@@ -1,6 +1,6 @@
 //! Flashblocks state processor.
 
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::Arc, time::{Duration, Instant}};
 
 use alloy_consensus::{
     Header,
@@ -98,6 +98,11 @@ where
                         block_number = flashblock.metadata.block_number,
                         flashblock_index = flashblock.index
                     );
+
+                    if flashblock.index == 0 && prev_pending_blocks.is_none() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+
                     match self.process_flashblock(prev_pending_blocks, flashblock) {
                         Ok(new_pending_blocks) => {
                             if new_pending_blocks.is_some() {
@@ -169,8 +174,8 @@ where
             ReconciliationStrategy::HandleReorg => {
                 warn!(
                     message = "reorg detected, recomputing pending flashblocks going ahead of reorg",
-                    tracked_txn_hashes = ?tracked_txn_hashes,
-                    block_txn_hashes = ?block_txn_hashes,
+                    // tracked_txn_hashes = ?tracked_txn_hashes,
+                    // block_txn_hashes = ?block_txn_hashes,
                 );
                 self.metrics.pending_clear_reorg.increment(1);
 

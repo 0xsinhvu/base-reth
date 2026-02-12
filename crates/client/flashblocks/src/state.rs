@@ -83,6 +83,9 @@ impl FlashblocksState {
         let block_number = block.number;
         match self.queue.send(StateUpdate::Canonical(block)) {
             Ok(_) => {
+                // TODO: check me (received it after 300ms)
+                // 2026-02-01T03:19:57.256431Z  INFO Block added to canonical chain number=41563325 hash=0x0e20220fea39802d41a408c42cc8b04f7cec2d4c699d76ba6ca1a05e0cf2f0c4
+                // 2026-02-01T03:19:57.433532Z  INFO exex{id="flashblocks-canon"}: added canonical block to processing queue block_number=41563325
                 info!(message = "added canonical block to processing queue", block_number)
             }
             Err(e) => {
