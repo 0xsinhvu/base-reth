@@ -448,7 +448,11 @@ where
 
         let pending_blocks = self.flashblocks_state.get_pending_blocks();
         if let Some(block_index) = block_index {
-            pending_overrides.state = pending_blocks.get_historical_state_overrides_at(block_number, block_index);
+            if let Some(state_overrides) = pending_blocks.get_historical_state_overrides_at(block_number, block_index) {
+                pending_overrides.state = Some(state_overrides);
+            } else {
+                return Err(EthApiError::HeaderNotFound(BlockId::number(block_number)).into());
+            }
         } else {
             pending_overrides.state = pending_blocks.get_state_overrides();
         }
@@ -525,7 +529,11 @@ where
 
         let pending_blocks = self.flashblocks_state.get_pending_blocks();
         if let Some(block_index) = block_index {
-            pending_overrides.state = pending_blocks.get_historical_state_overrides_at(block_number, block_index);
+            if let Some(state_overrides) = pending_blocks.get_historical_state_overrides_at(block_number, block_index) {
+                pending_overrides.state = Some(state_overrides);
+            } else {
+                return Err(EthApiError::HeaderNotFound(BlockId::number(block_number)).into());
+            }
         } else {
             pending_overrides.state = pending_blocks.get_state_overrides();
         }

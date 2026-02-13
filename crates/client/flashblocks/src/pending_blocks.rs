@@ -457,11 +457,7 @@ impl PendingBlocksAPI for Guard<Option<Arc<PendingBlocks>>> {
 
     fn get_historical_state_overrides_at(&self, block_number: u64, block_index: u64) -> Option<StateOverride> {
         let historical_state_overrides = self.as_ref().map(|pb| pb.get_historical_state_overrides()).unwrap_or_default();
-        if let Some(state_overrides) = historical_state_overrides.get(&(block_number, block_index)) {
-            Some(state_overrides.clone())
-        } else {
-            self.get_state_overrides()
-        }
+        historical_state_overrides.get(&(block_number, block_index)).cloned()
     }
 
     fn get_pending_logs(&self, filter: &Filter) -> Vec<Log> {
