@@ -444,15 +444,12 @@ where
 
         let block_number = block_number.unwrap();
         
-        let block_id;
         let mut pending_overrides = EvmOverrides::default();
 
         let pending_blocks = self.flashblocks_state.get_pending_blocks();
         if let Some(block_index) = block_index {
-            block_id = BlockId::Number(BlockNumberOrTag::Number(block_number - 1));
             pending_overrides.state = pending_blocks.get_historical_state_overrides_at(block_number, block_index);
         } else {
-            block_id = pending_blocks.get_canonical_block_number().into();
             pending_overrides.state = pending_blocks.get_state_overrides();
         }
 
@@ -461,6 +458,7 @@ where
         state_overrides_builder = state_overrides_builder.extend(overrides.unwrap_or_default());
         let final_overrides = state_overrides_builder.build();
 
+        let block_id = pending_blocks.get_canonical_block_number().into();
         EthCall::estimate_gas_at(&self.eth_api, transaction, block_id, Some(final_overrides))
             .await
             .map_err(Into::into)
@@ -523,15 +521,12 @@ where
 
         let block_number = block_number.unwrap();
         
-        let block_id;
         let mut pending_overrides = EvmOverrides::default();
 
         let pending_blocks = self.flashblocks_state.get_pending_blocks();
         if let Some(block_index) = block_index {
-            block_id = BlockId::Number(BlockNumberOrTag::Number(block_number - 1));
             pending_overrides.state = pending_blocks.get_historical_state_overrides_at(block_number, block_index);
         } else {
-            block_id = pending_blocks.get_canonical_block_number().into();
             pending_overrides.state = pending_blocks.get_state_overrides();
         }
 
@@ -549,6 +544,7 @@ where
 
         let payload = SimulatePayload { block_state_calls, ..opts };
 
+        let block_id = pending_blocks.get_canonical_block_number().into();
         EthCall::simulate_v1(&self.eth_api, payload, Some(block_id)).await.map_err(Into::into)
     }
 
