@@ -102,12 +102,31 @@ pub trait EthApiOverride {
         overrides: Option<StateOverride>,
     ) -> RpcResult<U256>;
 
+    /// Custom method to estimate gas with flashblock state support at a specific block number and index.
+    #[method(name = "fbEstimateGas")]
+    async fn fb_estimate_gas(
+        &self,
+        transaction: OpTransactionRequest,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
+        overrides: Option<StateOverride>,
+    ) -> RpcResult<U256>;
+
     /// Simulates transactions with flashblock state support.
     #[method(name = "simulateV1")]
     async fn simulate_v1(
         &self,
         opts: SimulatePayload<OpTransactionRequest>,
         block_number: Option<BlockId>,
+    ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Optimism>>>>;
+
+    /// Custom method to simulate transactions with flashblock state support at a specific block number and index.
+    #[method(name = "fbSimulateV1")]
+    async fn fb_simulate_v1(
+        &self,
+        opts: SimulatePayload<OpTransactionRequest>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Optimism>>>>;
 
     /// Returns logs matching the filter, including pending flashblock logs.
@@ -404,6 +423,49 @@ where
             .map_err(Into::into)
     }
 
+    async fn fb_estimate_gas(
+        &self,
+        transaction: OpTransactionRequest,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
+        overrides: Option<StateOverride>,
+    ) -> RpcResult<U256> {
+        debug!(
+            message = "rpc::fb_estimate_gas",
+            transaction = ?transaction,
+            block_number = ?block_number,
+            block_index = ?block_index,
+            overrides = ?overrides,
+        );
+
+        if block_number.is_none() {
+            return RpcResult::Ok(U256::ZERO);
+        }
+
+        let block_number = block_number.unwrap();
+        
+        let block_id;
+        let mut pending_overrides = EvmOverrides::default();
+
+        let pending_blocks = self.flashblocks_state.get_pending_blocks();
+        if let Some(block_index) = block_index {
+            block_id = BlockId::Number(BlockNumberOrTag::Number(block_number - 1));
+            pending_overrides.state = pending_blocks.get_historical_state_overrides_at(block_number, block_index);
+        } else {
+            block_id = pending_blocks.get_canonical_block_number().into();
+            pending_overrides.state = pending_blocks.get_state_overrides();
+        }
+
+        let mut state_overrides_builder =
+            StateOverridesBuilder::new(pending_overrides.state.unwrap_or_default());
+        state_overrides_builder = state_overrides_builder.extend(overrides.unwrap_or_default());
+        let final_overrides = state_overrides_builder.build();
+
+        EthCall::estimate_gas_at(&self.eth_api, transaction, block_id, Some(final_overrides))
+            .await
+            .map_err(Into::into)
+    }
+
     async fn simulate_v1(
         &self,
         opts: SimulatePayload<OpTransactionRequest>,
@@ -426,6 +488,53 @@ where
         }
 
         // Prepend flashblocks pending overrides to the block state calls
+        let mut block_state_calls: Vec<SimBlock<OpTransactionRequest>> = Vec::new();
+        for sim_block in opts.block_state_calls {
+            let mut state_overrides_builder =
+                StateOverridesBuilder::new(pending_overrides.state.clone().unwrap_or_default());
+            state_overrides_builder =
+                state_overrides_builder.extend(sim_block.state_overrides.unwrap_or_default());
+            let final_overrides = state_overrides_builder.build();
+
+            let block_state_call = SimBlock { state_overrides: Some(final_overrides), ..sim_block };
+            block_state_calls.push(block_state_call);
+        }
+
+        let payload = SimulatePayload { block_state_calls, ..opts };
+
+        EthCall::simulate_v1(&self.eth_api, payload, Some(block_id)).await.map_err(Into::into)
+    }
+
+    async fn fb_simulate_v1(
+        &self,
+        opts: SimulatePayload<OpTransactionRequest>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
+    ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Eth::NetworkTypes>>>> {
+        debug!(
+            message = "rpc::fb_simulate_v1",
+            block_number = ?block_number,
+            block_index = ?block_index,
+        );
+
+        if block_number.is_none() {
+            return RpcResult::Ok(Vec::new());
+        }
+
+        let block_number = block_number.unwrap();
+        
+        let block_id;
+        let mut pending_overrides = EvmOverrides::default();
+
+        let pending_blocks = self.flashblocks_state.get_pending_blocks();
+        if let Some(block_index) = block_index {
+            block_id = BlockId::Number(BlockNumberOrTag::Number(block_number - 1));
+            pending_overrides.state = pending_blocks.get_historical_state_overrides_at(block_number, block_index);
+        } else {
+            block_id = pending_blocks.get_canonical_block_number().into();
+            pending_overrides.state = pending_blocks.get_state_overrides();
+        }
+
         let mut block_state_calls: Vec<SimBlock<OpTransactionRequest>> = Vec::new();
         for sim_block in opts.block_state_calls {
             let mut state_overrides_builder =

@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap as StdHashMap, sync::Arc, time::Instant};
 
 use alloy_consensus::{Header, Sealed};
 use alloy_eips::BlockNumberOrTag;
@@ -34,6 +34,7 @@ pub struct PendingBlocksBuilder {
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
     state_overrides: Option<StateOverride>,
+    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
 
     bundle_state: BundleState,
 }
@@ -51,6 +52,7 @@ impl PendingBlocksBuilder {
             transaction_state: HashMap::new(),
             transaction_senders: HashMap::new(),
             state_overrides: None,
+            historical_state_overrides: StdHashMap::new(),
             bundle_state: BundleState::default(),
         }
     }
@@ -117,6 +119,12 @@ impl PendingBlocksBuilder {
     }
 
     #[inline]
+    pub(crate) fn with_historical_state_overrides(&mut self, historical_state_overrides: StdHashMap<(u64, u64), StateOverride>) -> &Self {
+        self.historical_state_overrides.extend(historical_state_overrides);
+        self
+    }
+
+    #[inline]
     pub(crate) fn with_bundle_state(&mut self, bundle_state: BundleState) -> &Self {
         self.bundle_state = bundle_state;
         self
@@ -131,6 +139,15 @@ impl PendingBlocksBuilder {
             return Err(BuildError::NoFlashblocks.into());
         }
 
+        let latest_header = self.headers.last().cloned().unwrap();
+        let latest_flashblock_index =self.flashblocks.last().map(|fb| fb.index).unwrap();
+
+        let mut merged_historical_state_overrides = self.historical_state_overrides;
+        merged_historical_state_overrides.insert(
+            (latest_header.number, latest_flashblock_index),
+            self.state_overrides.clone().unwrap_or_default()
+        );
+
         Ok(PendingBlocks {
             flashblocks: self.flashblocks,
             headers: self.headers,
@@ -142,6 +159,7 @@ impl PendingBlocksBuilder {
             transaction_state: self.transaction_state,
             transaction_senders: self.transaction_senders,
             state_overrides: self.state_overrides,
+            historical_state_overrides: merged_historical_state_overrides,
             bundle_state: self.bundle_state,
         })
     }
@@ -161,6 +179,7 @@ pub struct PendingBlocks {
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
     state_overrides: Option<StateOverride>,
+    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
 
     bundle_state: BundleState,
 }
@@ -275,6 +294,11 @@ impl PendingBlocks {
     /// Returns the state overrides for the pending state.
     pub fn get_state_overrides(&self) -> Option<StateOverride> {
         self.state_overrides.clone()
+    }
+
+    /// Returns the nearest state overrides for the pending state.
+    pub fn get_historical_state_overrides(&self) -> StdHashMap<(u64, u64), StateOverride> {
+        self.historical_state_overrides.clone()
     }
 
     /// Returns logs matching the filter from pending state.
@@ -420,6 +444,15 @@ impl PendingBlocksAPI for Guard<Option<Arc<PendingBlocks>>> {
 
     fn get_state_overrides(&self) -> Option<StateOverride> {
         self.as_ref().map(|pb| pb.get_state_overrides()).unwrap_or_default()
+    }
+
+    fn get_historical_state_overrides_at(&self, block_number: u64, block_index: u64) -> Option<StateOverride> {
+        let historical_state_overrides = self.as_ref().map(|pb| pb.get_historical_state_overrides()).unwrap_or_default();
+        if let Some(state_overrides) = historical_state_overrides.get(&(block_number, block_index)) {
+            Some(state_overrides.clone())
+        } else {
+            self.get_state_overrides()
+        }
     }
 
     fn get_pending_logs(&self, filter: &Filter) -> Vec<Log> {

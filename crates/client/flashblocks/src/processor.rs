@@ -1,6 +1,6 @@
 //! Flashblocks state processor.
 
-use std::{collections::BTreeMap, sync::Arc, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, HashMap}, sync::Arc, time::{Duration, Instant}};
 
 use alloy_consensus::{
     Header,
@@ -285,6 +285,8 @@ where
         prev_pending_blocks: Option<Arc<PendingBlocks>>,
         flashblocks: &Vec<Flashblock>,
     ) -> Result<Option<Arc<PendingBlocks>>> {
+        let tracker = Instant::now();
+
         // BTreeMap guarantees ascending order of keys while iterating
         let mut flashblocks_per_block = BTreeMap::<BlockNumber, Vec<&Flashblock>>::new();
         for flashblock in flashblocks {
@@ -321,10 +323,14 @@ where
             None => State::builder().with_database(state_provider_db).with_bundle_update().build(),
         };
 
-        let mut state_overrides =
+        let mut state_overrides=
             prev_pending_blocks.as_ref().map_or_else(StateOverride::default, |pending_blocks| {
                 pending_blocks.get_state_overrides().unwrap_or_default()
             });
+
+        let historical_state_overrides = prev_pending_blocks.as_ref().map_or_else(HashMap::new, |pending_blocks| {
+            pending_blocks.get_historical_state_overrides()
+        });
 
         for (_block_number, flashblocks) in flashblocks_per_block {
             let base = flashblocks
@@ -458,7 +464,13 @@ where
         // Extract the accumulated bundle state for state root calculation
         db.merge_transitions(BundleRetention::Reverts);
         pending_blocks_builder.with_bundle_state(db.take_bundle());
+        pending_blocks_builder.with_historical_state_overrides(historical_state_overrides);
         pending_blocks_builder.with_state_overrides(state_overrides);
+
+        debug!(
+            took = ?tracker.elapsed(),
+            message = "built pending state",
+        );
 
         Ok(Some(Arc::new(pending_blocks_builder.build()?)))
     }
