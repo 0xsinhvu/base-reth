@@ -148,6 +148,15 @@ impl PendingBlocksBuilder {
             self.state_overrides.clone().unwrap_or_default()
         );
 
+        // Keep only the 5 latest (by block number, then block index)
+        if merged_historical_state_overrides.len() > 3 {
+            let mut keys: Vec<_> = merged_historical_state_overrides.keys().copied().collect();
+            keys.sort_by(|a, b| b.cmp(a)); // descending: latest first
+            for key in keys.into_iter().skip(3) {
+                merged_historical_state_overrides.remove(&key);
+            }
+        }
+
         Ok(PendingBlocks {
             flashblocks: self.flashblocks,
             headers: self.headers,

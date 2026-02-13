@@ -469,7 +469,7 @@ where
 
         debug!(
             took = ?tracker.elapsed(),
-            message = "built pending state",
+            "built pending state",
         );
 
         Ok(Some(Arc::new(pending_blocks_builder.build()?)))
