@@ -142,10 +142,20 @@ impl PendingBlocksBuilder {
         let latest_header = self.headers.last().cloned().unwrap();
         let latest_flashblock_index =self.flashblocks.last().map(|fb| fb.index).unwrap();
 
+        let mut state_overrides_cutoff = self.state_overrides.clone().unwrap_or_default();
+        state_overrides_cutoff.retain(|_, acc| {
+            acc.state_diff.as_ref().map_or(false, |d| !d.is_empty())
+        });
+        for acc in state_overrides_cutoff.values_mut() {
+            acc.balance = None;
+            acc.nonce = None;
+            acc.code = None;
+        }
+
         let mut merged_historical_state_overrides = self.historical_state_overrides;
         merged_historical_state_overrides.insert(
             (latest_header.number, latest_flashblock_index),
-            self.state_overrides.clone().unwrap_or_default()
+            state_overrides_cutoff
         );
 
         // Keep only the 5 latest (by block number, then block index)
