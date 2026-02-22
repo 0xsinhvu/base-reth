@@ -37,11 +37,7 @@ type NodeStartedHook = Box<dyn FnMut(OpFullNode) -> Result<()> + Send + 'static>
 
 /// A thin wrapper over [`OpBuilder`] that accumulates RPC and node-start hooks.
 pub struct BaseBuilder {
-    /// The underlying OP node builder.
-    ///
-    /// Exposed publicly so extensions can call methods that don't need accumulation
-    /// (e.g., `install_exex`) directly on the inner builder.
-    pub builder: OpBuilder,
+    builder: OpBuilder,
     rpc_hooks: Vec<RpcModuleHook>,
     node_started_hooks: Vec<NodeStartedHook>,
 }
@@ -115,6 +111,15 @@ impl BaseBuilder {
         L: FnOnce(OpBuilder) -> R,
     {
         launcher(self.build())
+    }
+
+    /// Maps the add-ons with the given closure.
+    pub fn map_add_ons<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(OpAddOns) -> OpAddOns,
+    {
+        self.builder = self.builder.map_add_ons(f);
+        self
     }
 }
 

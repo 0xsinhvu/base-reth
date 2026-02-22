@@ -8,13 +8,15 @@ use alloy_primitives::{B256, U256};
 use base_bundles::{Bundle, MeterBundleResponse, ParsedBundle};
 use base_flashblocks::{FlashblocksAPI, PendingBlocksAPI};
 use jsonrpsee::core::{RpcResult, async_trait};
+use op_revm::L1BlockInfo;
 use reth_optimism_chainspec::OpChainSpec;
+use reth_optimism_evm::extract_l1_info_from_tx;
 use reth_optimism_primitives::OpBlock;
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{
     BlockReader, BlockReaderIdExt, ChainSpecProvider, HeaderProvider, StateProviderFactory,
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
     MeterBlockResponse, PendingState, PendingTrieCache, block::meter_block, meter::meter_bundle,
@@ -177,6 +179,9 @@ where
             })
         });
 
+        // Get L1 block info from the canonical block (not flashblock header, which has zero hash)
+        let l1_block_info = self.get_l1_block_info(canonical_block_number)?;
+
         // Meter bundle using utility function
         let output = meter_bundle(
             state_provider,
@@ -185,9 +190,17 @@ where
             &header,
             parent_beacon_block_root,
             pending_state,
+            l1_block_info,
         )
         .map_err(|e| {
-            error!(error = %e, "Bundle metering failed");
+            // Sample error msg:
+            // Transaction $TX_HASH execution failed: EVM reported invalid transaction ($TX_HASH): nonce $EXPECTED_NONCE too high, expected $EXPECTED_NONCE"
+            let error_msg = e.to_string();
+            if error_msg.contains("nonce") {
+                debug!(error = %e, "Bundle metering failed");
+            } else {
+                error!(error = %e, "Bundle metering failed");
+            }
             jsonrpsee::types::ErrorObjectOwned::owned(
                 jsonrpsee::types::ErrorCode::InternalError.code(),
                 format!("Bundle metering failed: {}", e),
@@ -317,6 +330,51 @@ where
         + 'static,
     FB: FlashblocksAPI + Send + Sync + 'static,
 {
+    /// Get L1 block info from the first transaction of a block.
+    ///
+    /// Uses the block number/tag to look up the block, which works for both canonical blocks
+    /// and when metering against pending flashblocks (where we use the canonical parent block
+    /// to get L1 info, since flashblock headers have zero hashes and can't be looked up by hash).
+    fn get_l1_block_info(&self, block_id: BlockNumberOrTag) -> RpcResult<L1BlockInfo> {
+        let first_tx = self
+            .provider
+            .block_by_number_or_tag(block_id)
+            .map_err(|e| {
+                error!(error = %e, block = ?block_id, "Failed to get block");
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    jsonrpsee::types::ErrorCode::InternalError.code(),
+                    format!("Failed to get block: {}", e),
+                    None::<()>,
+                )
+            })?
+            .ok_or_else(|| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    jsonrpsee::types::ErrorCode::InvalidParams.code(),
+                    format!("Block not found: {block_id:?}"),
+                    None::<()>,
+                )
+            })?
+            .body
+            .transactions
+            .first()
+            .ok_or_else(|| {
+                jsonrpsee::types::ErrorObjectOwned::owned(
+                    jsonrpsee::types::ErrorCode::InvalidParams.code(),
+                    format!("Block has no transactions: {block_id:?}"),
+                    None::<()>,
+                )
+            })?
+            .clone();
+
+        extract_l1_info_from_tx(&first_tx).map_err(|e| {
+            jsonrpsee::types::ErrorObjectOwned::owned(
+                jsonrpsee::types::ErrorCode::InvalidParams.code(),
+                format!("Failed to extract L1 block info from transaction: {}", e),
+                None::<()>,
+            )
+        })
+    }
+
     /// Internal helper to meter a block's execution
     fn meter_block_internal(&self, block: &OpBlock) -> RpcResult<MeterBlockResponse> {
         meter_block(self.provider.clone(), self.provider.chain_spec(), block).map_err(|e| {
@@ -367,9 +425,31 @@ mod tests {
         Ok((harness, client))
     }
 
+    async fn generate_txs_for_block(chain_id: u64) -> Vec<Bytes> {
+        vec![
+            TransactionBuilder::default()
+                .signer(Account::Charlie.signer_b256())
+                .chain_id(chain_id)
+                .nonce(0)
+                .to(address!("0x1111111111111111111111111111111111111111"))
+                .value(1000)
+                .gas_limit(21_000)
+                .max_fee_per_gas(1_000_000_000)
+                .max_priority_fee_per_gas(1_000_000_000)
+                .into_eip1559()
+                .into_encoded()
+                .into_encoded_bytes(),
+        ]
+    }
+
     #[tokio::test]
     async fn test_meter_bundle_empty() -> eyre::Result<()> {
-        let (_harness, client) = setup().await?;
+        let (harness, client) = setup().await?;
+
+        // Build a block with a tx so that we don't get an error about missing L1 block info
+        harness
+            .build_block_from_transactions(generate_txs_for_block(harness.chain_id()).await)
+            .await?;
 
         let bundle = create_bundle(vec![], 0, None);
 
@@ -378,7 +458,7 @@ mod tests {
         assert_eq!(response.results.len(), 0);
         assert_eq!(response.total_gas_used, 0);
         assert_eq!(response.gas_fees, U256::from(0));
-        assert_eq!(response.state_block_number, 0);
+        assert_eq!(response.state_block_number, 1);
 
         Ok(())
     }
@@ -386,6 +466,10 @@ mod tests {
     #[tokio::test]
     async fn test_meter_bundle_single_transaction() -> eyre::Result<()> {
         let (harness, client) = setup().await?;
+
+        harness
+            .build_block_from_transactions(generate_txs_for_block(harness.chain_id()).await)
+            .await?;
 
         let sender_address = Account::Alice.address();
         let sender_secret = Account::Alice.signer_b256();
@@ -428,6 +512,10 @@ mod tests {
     #[tokio::test]
     async fn test_meter_bundle_multiple_transactions() -> eyre::Result<()> {
         let (harness, client) = setup().await?;
+
+        harness
+            .build_block_from_transactions(generate_txs_for_block(harness.chain_id()).await)
+            .await?;
 
         let address1 = Account::Alice.address();
         let secret1 = Account::Alice.signer_b256();
@@ -510,36 +598,45 @@ mod tests {
 
     #[tokio::test]
     async fn test_meter_bundle_uses_latest_block() -> eyre::Result<()> {
-        let (_harness, client) = setup().await?;
+        let (harness, client) = setup().await?;
+        harness
+            .build_block_from_transactions(generate_txs_for_block(harness.chain_id()).await)
+            .await?;
 
-        let bundle = create_bundle(vec![], 0, None);
+        let bundle = create_bundle(vec![], 1, None);
 
         let response: MeterBundleResponse = client.request("base_meterBundle", (bundle,)).await?;
 
-        assert_eq!(response.state_block_number, 0);
+        assert_eq!(response.state_block_number, 1);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_meter_bundle_ignores_bundle_block_number() -> eyre::Result<()> {
-        let (_harness, client) = setup().await?;
+        let (harness, client) = setup().await?;
+        harness
+            .build_block_from_transactions(generate_txs_for_block(harness.chain_id()).await)
+            .await?;
 
-        let bundle1 = create_bundle(vec![], 0, None);
+        let bundle1 = create_bundle(vec![], 1, None);
         let response1: MeterBundleResponse = client.request("base_meterBundle", (bundle1,)).await?;
 
         let bundle2 = create_bundle(vec![], 999, None);
         let response2: MeterBundleResponse = client.request("base_meterBundle", (bundle2,)).await?;
 
         assert_eq!(response1.state_block_number, response2.state_block_number);
-        assert_eq!(response1.state_block_number, 0);
+        assert_eq!(response1.state_block_number, 1);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_meter_bundle_custom_timestamp() -> eyre::Result<()> {
-        let (_harness, client) = setup().await?;
+        let (harness, client) = setup().await?;
+        harness
+            .build_block_from_transactions(generate_txs_for_block(harness.chain_id()).await)
+            .await?;
 
         let custom_timestamp = 1234567890;
         let bundle = create_bundle(vec![], 0, Some(custom_timestamp));
@@ -554,13 +651,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_meter_bundle_arbitrary_block_number() -> eyre::Result<()> {
-        let (_harness, client) = setup().await?;
+        let (harness, client) = setup().await?;
+        harness
+            .build_block_from_transactions(generate_txs_for_block(harness.chain_id()).await)
+            .await?;
 
         let bundle = create_bundle(vec![], 999999, None);
 
         let response: MeterBundleResponse = client.request("base_meterBundle", (bundle,)).await?;
 
-        assert_eq!(response.state_block_number, 0);
+        assert_eq!(response.state_block_number, 1);
 
         Ok(())
     }
@@ -568,6 +668,9 @@ mod tests {
     #[tokio::test]
     async fn test_meter_bundle_gas_calculations() -> eyre::Result<()> {
         let (harness, client) = setup().await?;
+        harness
+            .build_block_from_transactions(generate_txs_for_block(harness.chain_id()).await)
+            .await?;
 
         let secret1 = Account::Alice.signer_b256();
         let secret2 = Account::Bob.signer_b256();
@@ -631,6 +734,121 @@ mod tests {
 
         // Bundle gas price should be weighted average: (3*21000 + 7*21000) / (21000 + 21000) = 5 gwei
         assert_eq!(response.bundle_gas_price, U256::from(5000000000u64));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_meter_bundle_no_l1_block_info() -> eyre::Result<()> {
+        let (_harness, client) = setup().await?;
+
+        let bundle = create_bundle(vec![], 1, None);
+        let response: Result<MeterBundleResponse, _> =
+            client.request("base_meterBundle", (bundle,)).await;
+
+        assert!(response.is_err());
+
+        Ok(())
+    }
+
+    /// Test that `meter_bundle` works when flashblocks are present with a zero-hash header.
+    ///
+    /// This test verifies the fix for an issue where `get_l1_block_info` would fail when
+    /// flashblocks were present because it was looking up the block by the flashblock
+    /// header's hash (which is always `B256::ZERO` for flashblocks) instead of using the
+    /// canonical block number.
+    ///
+    /// Without the fix, this test would fail with:
+    /// "Block not found: 0x0000000000000000000000000000000000000000000000000000000000000000"
+    #[tokio::test]
+    async fn test_meter_bundle_with_flashblocks_zero_hash_header() -> eyre::Result<()> {
+        use alloy_consensus::Header;
+        use alloy_primitives::{B256, Bloom};
+        use base_flashblocks::{FlashblocksConfig, PendingBlocksBuilder};
+        use base_flashtypes::{
+            ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
+        };
+        use url::Url;
+
+        // Create a shared flashblocks state that we can inject pending blocks into
+        let flashblocks_config =
+            FlashblocksConfig::new(Url::parse("ws://localhost:12345").unwrap(), 10);
+        let flashblocks_state = Arc::clone(&flashblocks_config.state);
+
+        // Setup harness with flashblocks-enabled metering
+        let harness = TestHarness::builder()
+            .with_ext::<MeteringExtension>(MeteringConfig::with_flashblocks(flashblocks_config))
+            .build()
+            .await?;
+        let client = harness.rpc_client()?;
+
+        // Build a canonical block with L1 block info deposit
+        harness
+            .build_block_from_transactions(generate_txs_for_block(harness.chain_id()).await)
+            .await?;
+
+        // Create a flashblock with a zero-hash header (this is how real flashblocks work)
+        // The header hash is B256::ZERO because the final block hash isn't known yet
+        let flashblock_header = Header {
+            number: 2, // Pending block on top of canonical block 1
+            timestamp: 1_700_000_001,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            ..Default::default()
+        };
+
+        // Seal with zero hash (this is what block_assembler.rs does)
+        let sealed_header = flashblock_header.seal(B256::ZERO);
+
+        // Create a minimal flashblock
+        let flashblock = Flashblock {
+            payload_id: Default::default(),
+            index: 0,
+            base: Some(ExecutionPayloadBaseV1 {
+                parent_beacon_block_root: B256::ZERO,
+                parent_hash: B256::ZERO,
+                fee_recipient: Default::default(),
+                prev_randao: B256::ZERO,
+                block_number: 2,
+                gas_limit: 30_000_000,
+                timestamp: 1_700_000_001,
+                extra_data: Default::default(),
+                base_fee_per_gas: alloy_primitives::U256::from(1_000_000_000u64),
+            }),
+            diff: ExecutionPayloadFlashblockDeltaV1 {
+                state_root: B256::ZERO,
+                receipts_root: B256::ZERO,
+                logs_bloom: Bloom::default(),
+                gas_used: 0,
+                block_hash: B256::ZERO,
+                transactions: vec![],
+                withdrawals: vec![],
+                withdrawals_root: B256::ZERO,
+                blob_gas_used: Some(0),
+            },
+            metadata: Metadata { block_number: 2 },
+        };
+
+        // Build PendingBlocks with zero-hash header
+        let mut builder = PendingBlocksBuilder::new();
+        builder.with_header(sealed_header);
+        builder.with_flashblocks([flashblock]);
+        let pending_blocks = builder.build()?;
+
+        // Inject the pending blocks into the flashblocks state
+        flashblocks_state.set_pending_blocks_for_testing(Some(pending_blocks));
+
+        // Now call meter_bundle - this should succeed with the fix
+        // Without the fix, it would fail with "Block not found: 0x0000..."
+        // because get_l1_block_info would try to look up block by zero hash
+        let bundle = create_bundle(vec![], 0, None);
+        let response: MeterBundleResponse = client.request("base_meterBundle", (bundle,)).await?;
+
+        // Verify we got a response and it used the flashblock state
+        // state_block_number should be 2 (the pending block number)
+        assert_eq!(response.state_block_number, 2);
+        // state_flashblock_index should be present and be 0
+        assert_eq!(response.state_flashblock_index, Some(0));
 
         Ok(())
     }

@@ -16,6 +16,8 @@ on:
           - final
         default: rc
 
+# Permissions:
+# - contents:write is required to push tags (create-tag.sh)
 permissions:
   contents: write
 

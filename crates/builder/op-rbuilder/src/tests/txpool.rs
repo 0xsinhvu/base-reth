@@ -1,23 +1,22 @@
-use crate::tests::{
-    BlockTransactionsExt, ChainDriverExt, LocalInstance, ONE_ETH, default_node_config,
-};
-use macros::rb_test;
+use base_builder_cli::OpRbuilderArgs;
 use reth_node_builder::NodeConfig;
 use reth_node_core::args::TxPoolArgs;
 use reth_optimism_chainspec::OpChainSpec;
 
+use crate::tests::{
+    BlockTransactionsExt, ChainDriverExt, ONE_ETH, default_node_config,
+    setup_test_instance_with_config,
+};
+
 /// This test ensures that pending pool custom limit is respected and priority tx would be included even when pool if full.
-#[rb_test(
-    config = NodeConfig::<OpChainSpec> {
-        txpool: TxPoolArgs {
-            pending_max_count: 50,
-            ..Default::default()
-        },
+#[tokio::test]
+async fn pending_pool_limit() -> eyre::Result<()> {
+    let config = NodeConfig::<OpChainSpec> {
+        txpool: TxPoolArgs { pending_max_count: 50, ..Default::default() },
         ..default_node_config()
-    },
-    standard
-)]
-async fn pending_pool_limit(rbuilder: LocalInstance) -> eyre::Result<()> {
+    };
+    let args = OpRbuilderArgs::default();
+    let rbuilder = setup_test_instance_with_config(args, config).await?;
     let driver = rbuilder.driver().await?;
     let accounts = driver.fund_accounts(50, ONE_ETH).await?;
 
@@ -26,11 +25,7 @@ async fn pending_pool_limit(rbuilder: LocalInstance) -> eyre::Result<()> {
     let acc_with_priority = accounts.last().unwrap();
 
     for _ in 0..50 {
-        let _ = driver
-            .create_transaction()
-            .with_signer(*acc_no_priority)
-            .send()
-            .await?;
+        let _ = driver.create_transaction().with_signer(acc_no_priority).send().await?;
     }
 
     assert_eq!(
@@ -45,7 +40,7 @@ async fn pending_pool_limit(rbuilder: LocalInstance) -> eyre::Result<()> {
     for _ in 0..10 {
         let tx = driver
             .create_transaction()
-            .with_signer(*acc_with_priority)
+            .with_signer(acc_with_priority)
             .with_max_priority_fee_per_gas(10)
             .send()
             .await?;

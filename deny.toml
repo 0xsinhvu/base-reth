@@ -1,3 +1,170 @@
+[advisories]
+# Ignore unmaintained/vulnerable crates that come from upstream dependencies we cannot control
+ignore = [
+    # rustls-pemfile is unmaintained but comes from bollard -> testcontainers (dev dependency)
+    # No safe upgrade available, waiting for upstream to migrate to rustls-pki-types
+    "RUSTSEC-2025-0134",
+
+    # tokio-tar has a PAX header vulnerability but comes from testcontainers (dev dependency)
+    # No safe upgrade available, tokio-tar is archived
+    "RUSTSEC-2025-0111",
+
+    # backoff is unmaintained but comes from rollup-boost -> kona-engine (upstream dependency)
+    # No safe upgrade available
+    "RUSTSEC-2025-0012",
+
+    # bincode is unmaintained but comes from reth-nippy-jar (upstream reth dependency)
+    # No safe upgrade available
+    "RUSTSEC-2025-0141",
+
+    # instant is unmaintained but comes from backoff -> rollup-boost (upstream dependency)
+    # No safe upgrade available
+    "RUSTSEC-2024-0384",
+
+    # paste is unmaintained but widely used in ecosystem (alloy, reth, etc.)
+    # No safe upgrade available
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "0BSD",
+    "BSL-1.0",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+# Allow workspace crates that don't have explicit license fields
+exceptions = [
+    { name = "macros", allow = ["MIT"] },
+]
+
 [bans]
 deny = ["reth"]
-multiple-versions = "allow"
+multiple-versions = "deny"
+
+# Skip crates with multiple versions from upstream dependencies that we cannot control
+# These are primarily from reth, alloy, and kona dependencies
+skip = [
+    # Windows platform crates - different versions used by various upstream deps
+    "windows-sys",
+    "windows",
+    "windows-core",
+    "windows-implement",
+    "windows-interface",
+    "windows-result",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+
+    # Core macro/derive crates - commonly have version differences across ecosystem
+    "syn",
+    "darling",
+    "darling_core",
+    "darling_macro",
+    "thiserror",
+    "thiserror-impl",
+    "strum",
+    "strum_macros",
+    "proptest-derive",
+
+    # Crypto/random crates - version differences from different crypto stacks
+    "rand",
+    "rand_core",
+    "rand_chacha",
+    "getrandom",
+    "secp256k1",
+    "secp256k1-sys",
+
+    # Hash/collection crates
+    "hashbrown",
+    "foldhash",
+    "itertools",
+    "lru",
+    "dashmap",
+
+    # System/platform crates
+    "rustix",
+    "linux-raw-sys",
+    "socket2",
+    "bitflags",
+    "redox_syscall",
+    "redox_users",
+
+    # Network crates
+    "tungstenite",
+    "tokio-tungstenite",
+
+    # Metrics
+    "metrics-util",
+    "metrics-exporter-prometheus",
+
+    # Serialization crates - version differences across ecosystem
+    "serde_spanned",
+    "toml",
+
+    # Other common duplicates from upstream
+    "base64",
+    "bindgen",
+    "cargo_metadata",
+    "cargo-platform",
+    "core-foundation",
+    "crossterm",
+    "gloo-timers",
+    "indexmap",
+    "miniz_oxide",
+    "openssl-probe",
+    "opentelemetry_sdk",
+    "opentelemetry-http",
+    "opentelemetry-otlp",
+    "opentelemetry-proto",
+    "opentelemetry",
+    "procfs-core",
+    "procfs",
+    "prost-derive",
+    "prost",
+    "rustc-hash",
+    "security-framework",
+    "send_wrapper",
+    "toml_datetime",
+    "toml_edit",
+    "tonic",
+    "tower",
+    "tracing-opentelemetry",
+    "unicode-width",
+    "webpki-roots",
+
+    # libp2p dependency chain version mismatch
+    "unsigned-varint",
+    "if-addrs",
+    "yamux",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# Allow git sources from known upstream repositories
+allow-git = [
+    "https://github.com/paradigmxyz/reth",
+    "https://github.com/op-rs/kona",
+    "https://github.com/flashbots/rollup-boost.git",
+]

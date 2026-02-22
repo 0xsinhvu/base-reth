@@ -44,8 +44,7 @@ where
 {
     let block_hash = block.header().hash_slow();
     let block_number = block.header().number();
-    let transactions: Vec<_> = block.body().transactions().cloned().collect();
-    let tx_count = transactions.len();
+    let transactions = block.body().transactions();
 
     // Get parent header
     let parent_hash = block.header().parent_hash();
@@ -73,7 +72,6 @@ where
     // Recover signers first (this can be parallelized in production)
     let signer_recovery_start = Instant::now();
     let recovered_transactions: Vec<_> = transactions
-        .iter()
         .map(|tx| {
             let tx_hash = tx.tx_hash();
             let signer = tx
@@ -82,6 +80,7 @@ where
             Ok(alloy_consensus::transaction::Recovered::new_unchecked(tx.clone(), signer))
         })
         .collect::<EyreResult<Vec<_>>>()?;
+    let tx_count = recovered_transactions.len();
     let signer_recovery_time = signer_recovery_start.elapsed().as_micros();
 
     // Execute transactions and measure time
@@ -115,8 +114,7 @@ where
 
     // Calculate state root and measure time
     let state_root_start = Instant::now();
-    let bundle_state = db.bundle_state.clone();
-    let hashed_state = state_provider.hashed_post_state(&bundle_state);
+    let hashed_state = state_provider.hashed_post_state(&db.bundle_state);
     let _state_root = state_provider
         .state_root(hashed_state)
         .map_err(|e| eyre!("Failed to calculate state root: {}", e))?;

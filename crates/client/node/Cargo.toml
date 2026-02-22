@@ -30,41 +30,49 @@ test-utils = [
 	"dep:reth-chainspec",
 	"dep:reth-ipc",
 	"dep:reth-node-core",
-	"dep:reth-optimism-primitives",
-	"dep:reth-optimism-rpc",
 	"dep:reth-primitives-traits",
 	"dep:reth-rpc-layer",
 	"dep:reth-tasks",
-	"dep:reth-tracing",
-	"dep:tokio",
 	"dep:tower",
 	"dep:tracing-subscriber",
 	"dep:url",
-	"reth-chainspec?/test-utils",
+	"reth-chainspec/test-utils",
 	"reth-db/test-utils",
+	"reth-evm/test-utils",
 	"reth-node-builder/test-utils",
 	"reth-optimism-node/test-utils",
 	"reth-primitives-traits?/test-utils",
 	"reth-provider/test-utils",
+	"reth-transaction-pool/test-utils",
 ]
 
 [dependencies]
 # Project
+base-client-engine.workspace = true
 base-primitives = { workspace = true, optional = true }
 
 # reth
-reth-db.workspace = true
+reth-db = { workspace = true, features = ["op"] }
 reth-optimism-node.workspace = true
 reth-optimism-chainspec.workspace = true
+reth-optimism-storage.workspace = true
+reth-optimism-txpool.workspace = true
+reth-rpc-api.workspace = true
+reth-rpc-server-types.workspace = true
+reth-transaction-pool.workspace = true
+reth-evm.workspace = true
+reth-node-api.workspace = true
+reth-optimism-forks.workspace = true
+reth-optimism-payload-builder.workspace = true
 reth-ipc = { workspace = true, optional = true }
-reth-tracing = { workspace = true, optional = true }
+reth-tracing.workspace = true
 reth-rpc-layer = { workspace = true, optional = true }
-reth-provider = { workspace = true }
-reth-node-builder = { workspace = true }
+reth-provider.workspace = true
+reth-node-builder.workspace = true
 reth-node-core = { workspace = true, optional = true }
 reth-primitives-traits = { workspace = true, optional = true }
-reth-optimism-rpc = { workspace = true, features = ["client"], optional = true }
-reth-optimism-primitives = { workspace = true, optional = true }
+reth-optimism-rpc = { workspace = true, features = ["client"] }
+reth-optimism-primitives.workspace = true
 reth-chainspec = { workspace = true, optional = true }
 reth-tasks = { workspace = true, optional = true }
 
@@ -83,7 +91,8 @@ op-alloy-rpc-types-engine = { workspace = true, optional = true }
 op-alloy-network = { workspace = true, optional = true }
 
 # tokio
-tokio = { workspace = true, optional = true }
+tokio.workspace = true
+serde.workspace = true
 
 # rpc
 jsonrpsee = { workspace = true, optional = true }

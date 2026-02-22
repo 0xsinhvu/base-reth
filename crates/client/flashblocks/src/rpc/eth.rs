@@ -132,6 +132,13 @@ pub trait EthApiOverride {
     /// Returns logs matching the filter, including pending flashblock logs.
     #[method(name = "getLogs")]
     async fn get_logs(&self, filter: Filter) -> RpcResult<Vec<Log>>;
+
+    /// Returns the number of transactions in a block by block number.
+    #[method(name = "getBlockTransactionCountByNumber")]
+    async fn get_block_transaction_count_by_number(
+        &self,
+        number: BlockNumberOrTag,
+    ) -> RpcResult<Option<U256>>;
 }
 
 /// Extended Eth API with flashblocks support.
@@ -271,8 +278,9 @@ where
         // state hasn't been cleared yet after canonical block commit
         if let Some(canonical_tx) = EthTransactions::transaction_by_hash(&self.eth_api, tx_hash)
             .await?
-            .map(|tx| tx.into_transaction(self.eth_api.tx_resp_builder()))
-            .transpose()?
+            .map(|tx| tx.into_transaction(self.eth_api.converter()))
+            .transpose()
+            .map_err(Eth::Error::from)?
         {
             return Ok(Some(canonical_tx));
         }
@@ -613,6 +621,38 @@ where
         all_logs.extend(deduped_pending_logs);
 
         Ok(all_logs)
+    }
+
+    async fn get_block_transaction_count_by_number(
+        &self,
+        number: BlockNumberOrTag,
+    ) -> RpcResult<Option<U256>> {
+        debug!(
+            message = "rpc::get_block_transaction_count_by_number",
+            block_number = ?number
+        );
+
+        if number.is_pending() {
+            self.metrics.rpc_get_block_transaction_count_by_number.increment(1);
+            let pending_blocks = self.flashblocks_state.get_pending_blocks();
+            if let Some(block) = pending_blocks.get_block(false) {
+                let count = block.transactions.len();
+                return Ok(Some(U256::from(count)));
+            }
+            // No pending state available — treat `pending` as `latest`
+            return EthBlocks::block_transaction_count(
+                &self.eth_api,
+                BlockNumberOrTag::Latest.into(),
+            )
+            .await
+            .map(|opt| opt.map(U256::from))
+            .map_err(Into::into);
+        }
+
+        EthBlocks::block_transaction_count(&self.eth_api, number.into())
+            .await
+            .map(|opt| opt.map(U256::from))
+            .map_err(Into::into)
     }
 }
 

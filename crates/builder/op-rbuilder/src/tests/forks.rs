@@ -1,11 +1,13 @@
-use crate::tests::{BlockTransactionsExt, LocalInstance};
-use alloy_eips::{BlockNumberOrTag::Latest, Encodable2718, eip1559::MIN_PROTOCOL_BASE_FEE};
-use alloy_primitives::bytes;
-use macros::{if_flashblocks, if_standard, rb_test};
 use std::time::Duration;
 
-#[rb_test]
-async fn jovian_block_parameters_set(rbuilder: LocalInstance) -> eyre::Result<()> {
+use alloy_eips::{BlockNumberOrTag::Latest, Encodable2718, eip1559::MIN_PROTOCOL_BASE_FEE};
+use alloy_primitives::bytes;
+
+use crate::tests::{BlockTransactionsExt, setup_test_instance};
+
+#[tokio::test]
+async fn jovian_block_parameters_set() -> eyre::Result<()> {
+    let rbuilder = setup_test_instance().await?;
     let driver = rbuilder.driver().await?;
     let tx_one = driver.create_transaction().send().await?;
     let tx_two = driver.create_transaction().send().await?;
@@ -18,46 +20,29 @@ async fn jovian_block_parameters_set(rbuilder: LocalInstance) -> eyre::Result<()
 
     assert!(block.header.blob_gas_used.is_some());
 
-    // Two user transactions + two builder transactions, all minimum size
-    if_flashblocks! {
-        assert_eq!(block.header.blob_gas_used.unwrap(), 160_000);
-    }
-
-    // Two user transactions + one builder transactions, all minimum size
-    if_standard! {
-        assert_eq!(block.header.blob_gas_used.unwrap(), 120_000);
-    }
+    // Two user transactions (no deposit in blob_gas, deposits are L1 data), all minimum size (flashblocks mode)
+    // Each tx contributes ~40,000 to blob_gas_used
+    assert_eq!(block.header.blob_gas_used.unwrap(), 80_000);
 
     // Version byte
     assert_eq!(block.header.extra_data.slice(0..1), bytes!("0x01"));
 
     // Min Base Fee of zero by default
-    assert_eq!(
-        block.header.extra_data.slice(9..=16),
-        bytes!("0x0000000000000000"),
-    );
+    assert_eq!(block.header.extra_data.slice(9..=16), bytes!("0x0000000000000000"),);
 
     Ok(())
 }
 
-#[rb_test]
-async fn jovian_no_tx_pool_sync(rbuilder: LocalInstance) -> eyre::Result<()> {
+#[tokio::test]
+async fn jovian_no_tx_pool_sync() -> eyre::Result<()> {
+    let rbuilder = setup_test_instance().await?;
     let driver = rbuilder.driver().await?;
-    let block = driver
-        .build_new_block_with_txs_timestamp(vec![], Some(true), None, None, Some(0))
-        .await?;
+    let block =
+        driver.build_new_block_with_txs_timestamp(vec![], Some(true), None, None, Some(0)).await?;
 
-    // Deposit transaction + user transaction
-    if_flashblocks! {
-        assert_eq!(block.transactions.len(), 1);
-        assert_eq!(block.header.blob_gas_used, Some(0));
-    }
-
-    // Standard includes a builder transaction when no-tx-pool is set
-    if_standard! {
-        assert_eq!(block.transactions.len(), 2);
-        assert_eq!(block.header.blob_gas_used, Some(40_000));
-    }
+    // Deposit transaction only (flashblocks mode)
+    assert_eq!(block.transactions.len(), 1);
+    assert_eq!(block.header.blob_gas_used, Some(0));
 
     let tx = driver.create_transaction().build().await;
     let block = driver
@@ -70,28 +55,18 @@ async fn jovian_no_tx_pool_sync(rbuilder: LocalInstance) -> eyre::Result<()> {
         )
         .await?;
 
-    // Deposit transaction + user transaction
-    if_flashblocks! {
-        assert_eq!(block.transactions.len(), 2);
-        assert_eq!(block.header.blob_gas_used, Some(40_000));
-    }
-
-    // Standard includes a builder transaction when no-tx-pool is set
-    if_standard! {
-        assert_eq!(block.transactions.len(), 3);
-        assert_eq!(block.header.blob_gas_used, Some(80_000));
-    }
+    // Deposit transaction + user transaction (flashblocks mode)
+    assert_eq!(block.transactions.len(), 2);
+    assert_eq!(block.header.blob_gas_used, Some(40_000));
 
     Ok(())
 }
 
-#[rb_test]
-async fn jovian_minimum_base_fee(rbuilder: LocalInstance) -> eyre::Result<()> {
+#[tokio::test]
+async fn jovian_minimum_base_fee() -> eyre::Result<()> {
+    let rbuilder = setup_test_instance().await?;
     let driver = rbuilder.driver().await?;
-    let genesis = driver
-        .get_block(Latest)
-        .await?
-        .expect("must have genesis block");
+    let genesis = driver.get_block(Latest).await?.expect("must have genesis block");
 
     assert_eq!(genesis.header.base_fee_per_gas, Some(1));
 
@@ -102,10 +77,7 @@ async fn jovian_minimum_base_fee(rbuilder: LocalInstance) -> eyre::Result<()> {
         .build_new_block_with_txs_timestamp(vec![], None, Some(block_timestamp), None, min_base_fee)
         .await?;
 
-    assert_eq!(
-        block_one.header.extra_data.slice(9..=16),
-        bytes!("0x000000000000000E"),
-    );
+    assert_eq!(block_one.header.extra_data.slice(9..=16), bytes!("0x000000000000000E"),);
 
     let overpriced_tx = driver
         .create_transaction()
@@ -123,10 +95,7 @@ async fn jovian_minimum_base_fee(rbuilder: LocalInstance) -> eyre::Result<()> {
         .build_new_block_with_txs_timestamp(vec![], None, Some(block_timestamp), None, min_base_fee)
         .await?;
 
-    assert_eq!(
-        block_two.header.extra_data.slice(9..=16),
-        bytes!("0x000000000000000E"),
-    );
+    assert_eq!(block_two.header.extra_data.slice(9..=16), bytes!("0x000000000000000E"),);
 
     assert!(block_two.includes(overpriced_tx.tx_hash()));
     assert!(!block_two.includes(underpriced_tx.tx_hash()));
@@ -134,13 +103,11 @@ async fn jovian_minimum_base_fee(rbuilder: LocalInstance) -> eyre::Result<()> {
     Ok(())
 }
 
-#[rb_test]
-async fn jovian_minimum_fee_must_be_set(rbuilder: LocalInstance) -> eyre::Result<()> {
+#[tokio::test]
+async fn jovian_minimum_fee_must_be_set() -> eyre::Result<()> {
+    let rbuilder = setup_test_instance().await?;
     let driver = rbuilder.driver().await?;
-    let genesis = driver
-        .get_block(Latest)
-        .await?
-        .expect("must have genesis block");
+    let genesis = driver.get_block(Latest).await?.expect("must have genesis block");
     let block_timestamp = Duration::from_secs(genesis.header.timestamp) + Duration::from_secs(1);
     let response = driver
         .build_new_block_with_txs_timestamp(vec![], None, Some(block_timestamp), None, None)

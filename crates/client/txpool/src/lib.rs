@@ -1,13 +1,13 @@
 #![doc = include_str!("../README.md")]
-#![doc(issue_tracker_base_url = "https://github.com/base/node-reth/issues/")]
+#![doc(issue_tracker_base_url = "https://github.com/base/base/issues/")]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 mod events;
 pub use events::{EventLog, Pool, TxEvent};
 
-mod exex;
-pub use exex::tracex_exex;
+mod subscription;
+pub use subscription::tracex_subscription;
 
 mod rpc;
 pub use rpc::{
