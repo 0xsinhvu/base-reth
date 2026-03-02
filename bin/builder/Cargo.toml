@@ -1,7 +1,6 @@
 [package]
-name = "base-builder"
+name = "base-builder-bin"
 description = "Base Builder Binary"
-
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,21 +8,39 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "base-builder"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
-# Workspace
+# workspace
 base-cli-utils.workspace = true
-op-rbuilder.workspace = true
+base-client-node.workspace = true
+base-builder-core.workspace = true
+base-builder-metering.workspace = true
+base-txpool-rpc.workspace = true
 
 # reth
+reth-optimism-cli = { workspace = true, features = ["otlp"] }
+reth-optimism-node.workspace = true
 reth-cli-util.workspace = true
 
-[build-dependencies]
-vergen = { workspace = true, features = ["build", "cargo", "emit_and_set"] }
-vergen-git2.workspace = true
+# cli
+clap.workspace = true
+
+# misc
+eyre.workspace = true
+
+[dev-dependencies]
+# workspace
+base-builder-core = { workspace = true, features = ["test-utils"] }
+
+# misc
+rstest.workspace = true
 
 [features]
 default = [ "jemalloc" ]
-jemalloc = [ "op-rbuilder/jemalloc", "reth-cli-util/jemalloc" ]
+jemalloc = [ "base-builder-core/jemalloc", "reth-optimism-cli/jemalloc" ]

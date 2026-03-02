@@ -1,7 +1,6 @@
 [package]
 name = "base-reth-node"
 description = "Base Reth Binary"
-
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,21 +12,24 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-# internal
+# workspace
+base-txpool-rpc.workspace = true
+base-txpool-tracing.workspace = true
+base-metering.workspace = true
 base-cli-utils.workspace = true
+base-flashblocks.workspace = true
 base-client-node.workspace = true
 base-flashblocks-node.workspace = true
-base-metering.workspace = true
-base-txpool.workspace = true
+base-proofs-extension.workspace = true
 
 # reth
+reth-cli-util.workspace = true
 reth-optimism-node.workspace = true
 reth-optimism-cli = { workspace = true, features = ["otlp"] }
-reth-cli-util.workspace = true
 
-# misc
+# cli
 clap.workspace = true
 
 [features]
-default = []
+default = [ "jemalloc" ]
 jemalloc = [ "reth-cli-util/jemalloc", "reth-optimism-cli/jemalloc" ]

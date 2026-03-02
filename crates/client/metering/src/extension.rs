@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use base_client_node::{BaseBuilder, BaseNodeExtension, FromExtensionConfig};
+use base_client_node::{BaseNodeExtension, FromExtensionConfig, NodeHooks};
 use base_flashblocks::{FlashblocksConfig, FlashblocksState};
 use tracing::info;
 
@@ -26,20 +26,20 @@ impl MeteringExtension {
 }
 
 impl BaseNodeExtension for MeteringExtension {
-    /// Applies the extension to the supplied builder.
-    fn apply(self: Box<Self>, builder: BaseBuilder) -> BaseBuilder {
+    /// Applies the extension to the supplied hooks.
+    fn apply(self: Box<Self>, hooks: NodeHooks) -> NodeHooks {
         if !self.enabled {
-            return builder;
+            return hooks;
         }
 
         let flashblocks_config = self.flashblocks_config;
 
-        builder.add_rpc_module(move |ctx| {
+        hooks.add_rpc_module(move |ctx| {
             info!(message = "Starting Metering RPC");
 
             // Get flashblocks state from config, or create a default one if not configured
             let fb_state: Arc<FlashblocksState> =
-                flashblocks_config.as_ref().map(|cfg| cfg.state.clone()).unwrap_or_default();
+                flashblocks_config.as_ref().map(|cfg| Arc::clone(&cfg.state)).unwrap_or_default();
 
             let metering_api = MeteringApiImpl::new(ctx.provider().clone(), fb_state);
             ctx.modules.merge_configured(metering_api.into_rpc())?;

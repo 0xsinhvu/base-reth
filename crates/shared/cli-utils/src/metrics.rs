@@ -1,4 +1,4 @@
-//! Utility module to house implementation and declaration of MetricsArgs since it's being used in
+//! Utility module to house implementation and declaration of `MetricsArgs` since it's being used in
 //! multiple places, it's just being referenced from this module.
 
 use std::net::IpAddr;
@@ -19,6 +19,15 @@ pub struct MetricsArgs {
         env = "BASE_NODE_METRICS_ENABLED"
     )]
     pub enabled: bool,
+
+    /// The interval for prometheus metrics collection in seconds.
+    #[arg(
+        long = "metrics.interval",
+        global = true,
+        default_value = None,
+        env = "BASE_NODE_METRICS_INTERVAL"
+    )]
+    pub interval: Option<u64>,
 
     /// The port to serve Prometheus metrics on.
     #[arg(
@@ -51,7 +60,7 @@ impl MetricsArgs {
     /// This function should be called at the beginning of the program.
     pub fn init(&self) -> Result<(), metrics_exporter_prometheus::BuildError> {
         if self.enabled {
-            PrometheusServer::init(self.addr, self.port, None)?;
+            PrometheusServer::init(self.addr, self.port, self.interval)?;
         }
 
         Ok(())
@@ -66,7 +75,7 @@ impl MetricsArgs {
         F: FnOnce(),
     {
         if self.enabled {
-            PrometheusServer::init(self.addr, self.port, None)?;
+            PrometheusServer::init(self.addr, self.port, self.interval)?;
             f();
         }
 
@@ -82,7 +91,7 @@ mod tests {
 
     use super::*;
 
-    /// Helper struct to parse MetricsArgs within a test CLI structure.
+    /// Helper struct to parse `MetricsArgs` within a test CLI structure.
     #[derive(Parser, Debug)]
     struct TestCli {
         #[command(flatten)]
@@ -99,6 +108,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             "Default for metrics.addr should be 0.0.0.0."
         );
+        assert_eq!(cli.metrics.interval, None, "Default for metrics.interval should be None.");
     }
 
     #[test]
@@ -110,6 +120,8 @@ mod tests {
             "9999",
             "--metrics.addr",
             "127.0.0.1",
+            "--metrics.interval",
+            "10",
         ]);
         assert!(cli.metrics.enabled, "metrics.enabled should be true.");
         assert_eq!(cli.metrics.port, 9999, "metrics.port should be parsed from CLI.");
@@ -118,5 +130,6 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             "metrics.addr should be parsed from CLI."
         );
+        assert_eq!(cli.metrics.interval, Some(10), "metrics.interval should be parsed from CLI.");
     }
 }

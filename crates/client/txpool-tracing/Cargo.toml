@@ -1,0 +1,66 @@
+[package]
+name = "base-txpool-tracing"
+description = "Transaction tracing extensions for Base"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace
+base-flashblocks.workspace = true
+base-client-node.workspace = true
+
+# reth
+reth-node-api.workspace = true
+reth-provider.workspace = true
+reth-tracing.workspace = true
+reth-primitives-traits.workspace = true
+reth-transaction-pool.workspace = true
+
+# alloy
+alloy-primitives.workspace = true
+
+# async
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+
+# misc
+lru.workspace = true
+chrono.workspace = true
+metrics.workspace = true
+derive_more = { workspace = true, features = ["display"] }
+tracing.workspace = true
+metrics-derive.workspace = true
+
+[dev-dependencies]
+# workspace
+base-flashblocks.workspace = true
+base-primitives.workspace = true
+base-client-node = { workspace = true, features = ["test-utils"] }
+base-flashblocks-node = { workspace = true, features = ["test-utils"] }
+
+# reth
+reth-optimism-primitives.workspace = true
+reth-transaction-pool = { workspace = true, features = ["test-utils"] }
+
+# revm
+revm-database.workspace = true
+
+# alloy
+alloy-eips.workspace = true
+alloy-consensus.workspace = true
+alloy-rpc-types-engine.workspace = true
+
+# op-alloy
+op-alloy-consensus.workspace = true
+op-alloy-rpc-types.workspace = true
+
+# misc
+eyre.workspace = true

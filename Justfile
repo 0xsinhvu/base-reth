@@ -1,4 +1,5 @@
 set positional-arguments := true
+set dotenv-filename := "etc/docker/devnet-env"
 
 alias t := test
 alias f := fix
@@ -45,10 +46,33 @@ zepter-fix:
     @command -v zepter >/dev/null 2>&1 || cargo install zepter
     zepter format features --fix
 
-# Runs tests across workspace with all features enabled
-test: build-contracts
+# Installs cargo-nextest if not present
+install-nextest:
     @command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest
-    RUSTFLAGS="-D warnings" cargo nextest run --workspace --all-features
+
+# Runs tests across workspace with all features enabled (excludes devnet)
+test: install-nextest build-contracts
+    RUSTFLAGS="-D warnings" cargo nextest run --workspace --all-features --exclude devnet
+
+# Runs tests with ci profile for minimal disk usage
+test-ci: install-nextest build-contracts
+    RUSTFLAGS="-D warnings" cargo nextest run --workspace --all-features --exclude devnet --cargo-profile ci
+
+# Runs devnet tests (requires Docker)
+devnet-tests: install-nextest build-contracts
+    cargo nextest run -p devnet
+
+# Runs devnet tests with ci profile for minimal disk usage
+devnet-tests-ci: install-nextest build-contracts
+    cargo nextest run -p devnet --cargo-profile ci
+
+# Pre-pulls Docker images needed for system tests
+system-tests-pull-images:
+    docker build -t devnet-setup:local -f etc/docker/Dockerfile.devnet .
+    docker pull ghcr.io/paradigmxyz/reth:v1.10.2
+    docker pull sigp/lighthouse:v8.0.1
+    docker pull us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.16.5
+    docker pull us-docker.pkg.dev/oplabs-tools-artifacts/images/op-batcher:v1.16.3
 
 # Runs cargo hack against the workspace
 hack:
@@ -67,6 +91,10 @@ format-fix:
 check-clippy: build-contracts
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Checks clippy with ci profile for minimal disk usage
+check-clippy-ci: build-contracts
+    cargo clippy --workspace --all-targets --profile ci -- -D warnings
+
 # Fixes any clippy issues
 clippy-fix:
     cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged
@@ -79,6 +107,10 @@ build:
 build-all-targets: build-contracts
     cargo build --workspace --all-targets
 
+# Builds all targets with ci profile (minimal disk usage for CI)
+build-ci: build-contracts
+    cargo build --workspace --all-targets --profile ci
+
 # Builds the workspace with maxperf
 build-maxperf:
     cargo build --workspace --profile maxperf --features jemalloc
@@ -89,7 +121,7 @@ build-node:
 
 # Build the contracts used for tests
 build-contracts:
-    cd crates/shared/primitives/contracts && forge build
+    cd crates/shared/primitives/contracts && forge soldeer install && forge build
 
 # Cleans the workspace
 clean:
@@ -100,9 +132,9 @@ check-udeps: build-contracts
     @command -v cargo-udeps >/dev/null 2>&1 || cargo install cargo-udeps
     cargo +nightly udeps --workspace --all-features --all-targets
 
-# Checks that shared crates don't depend on client crates
+# Checks crate dependency boundary rules
 check-crate-deps:
-    ./scripts/check-crate-deps.sh
+    ./etc/scripts/ci/check-crate-deps.sh
 
 # Watches tests
 watch-test: build-contracts
@@ -120,6 +152,43 @@ benches:
 bench-flashblocks:
     cargo bench -p base-flashblocks --bench pending_state
 
-# Builds tester binary (requires testing feature)
-build-tester:
-    cargo build -p op-rbuilder --bin tester --features "testing"
+# Stops devnet, deletes data, and starts fresh
+devnet: devnet-down
+    docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml up -d --build --scale contender=0
+
+# Stops devnet and deletes all data
+devnet-down:
+    -docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml down
+    rm -rf .devnet
+
+# Shows devnet block numbers and sync status
+devnet-status:
+    ./etc/scripts/devnet/status.sh
+
+# Shows funded test accounts with live balances and nonces
+devnet-accounts:
+    ./etc/scripts/devnet/accounts.sh
+
+# Sends test transactions to L1 and L2
+devnet-smoke:
+    ./etc/scripts/devnet/smoke.sh
+
+# Runs full devnet checks (status + smoke tests)
+devnet-checks: devnet-status devnet-smoke
+
+# Starts the contender load generator
+devnet-load:
+    docker compose -f etc/docker/docker-compose.yml up -d --no-deps contender
+
+# Stops the contender load generator
+devnet-load-down:
+    docker compose -f etc/docker/docker-compose.yml down contender
+
+# Stream FB's from the builder via websocket
+devnet-flashblocks:
+    @command -v flashblocks-websocket-client >/dev/null 2>&1 || go install github.com/danyalprout/flashblocks-websocket-client@latest
+    flashblocks-websocket-client ws://localhost:${L2_BUILDER_FLASHBLOCKS_PORT}
+
+# Stream logs from devnet containers (optionally specify container names)
+devnet-logs *containers:
+    docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml logs -f {{ containers }}

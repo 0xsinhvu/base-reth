@@ -1,0 +1,62 @@
+[package]
+name = "base-protocol"
+description = "Protocol Types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = [ "std" ]
+std = [
+	"alloy-consensus/std",
+	"alloy-eips/std",
+	"alloy-primitives/std",
+	"op-alloy-rpc-types-engine/std",
+]
+serde = [
+	"alloy-consensus/serde",
+	"alloy-eips/serde",
+	"alloy-primitives/serde",
+	"dep:serde",
+	"op-alloy-rpc-types-engine/serde",
+]
+arbitrary = [
+	"alloy-consensus/arbitrary",
+	"alloy-eips/arbitrary",
+	"alloy-primitives/arbitrary",
+	"alloy-rpc-types-eth/arbitrary",
+	"dep:arbitrary",
+	"op-alloy-rpc-types-engine/arbitrary",
+]
+
+[dependencies]
+# alloy
+alloy-eips.workspace = true
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
+
+# op-alloy
+op-alloy-rpc-types-engine.workspace = true
+
+# misc
+thiserror.workspace = true
+derive_more = { workspace = true, features = ["display"] }
+
+# optional
+arbitrary = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+# op-alloy
+op-alloy-consensus.workspace = true
+
+# misc
+rand.workspace = true
+serde_json.workspace = true

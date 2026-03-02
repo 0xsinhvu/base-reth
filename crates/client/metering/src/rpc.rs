@@ -43,7 +43,7 @@ where
         + Clone,
     FB: FlashblocksAPI,
 {
-    /// Creates a new instance of MeteringApi.
+    /// Creates a new instance of `MeteringApi`.
     pub fn new(provider: Provider, flashblocks_api: Arc<FB>) -> Self {
         Self { provider, flashblocks_api, pending_trie_cache: PendingTrieCache::new() }
     }
@@ -101,7 +101,7 @@ where
                     .map_err(|e| {
                         jsonrpsee::types::ErrorObjectOwned::owned(
                             jsonrpsee::types::ErrorCode::InternalError.code(),
-                            format!("Failed to get canonical block header: {}", e),
+                            format!("Failed to get canonical block header: {e}"),
                             None::<()>,
                         )
                     })?
@@ -124,7 +124,7 @@ where
         let parsed_bundle = ParsedBundle::try_from(bundle).map_err(|e| {
             jsonrpsee::types::ErrorObjectOwned::owned(
                 jsonrpsee::types::ErrorCode::InvalidParams.code(),
-                format!("Failed to parse bundle: {}", e),
+                format!("Failed to parse bundle: {e}"),
                 None::<()>,
             )
         })?;
@@ -135,7 +135,7 @@ where
                 error!(error = %e, "Failed to get state provider");
                 jsonrpsee::types::ErrorObjectOwned::owned(
                     jsonrpsee::types::ErrorCode::InternalError.code(),
-                    format!("Failed to get state provider: {}", e),
+                    format!("Failed to get state provider: {e}"),
                     None::<()>,
                 )
             })?;
@@ -159,7 +159,7 @@ where
                     error!(error = %e, "Failed to cache pending trie input");
                     jsonrpsee::types::ErrorObjectOwned::owned(
                         jsonrpsee::types::ErrorCode::InternalError.code(),
-                        format!("Failed to cache pending trie input: {}", e),
+                        format!("Failed to cache pending trie input: {e}"),
                         None::<()>,
                     )
                 })?;
@@ -203,7 +203,7 @@ where
             }
             jsonrpsee::types::ErrorObjectOwned::owned(
                 jsonrpsee::types::ErrorCode::InternalError.code(),
-                format!("Bundle metering failed: {}", e),
+                format!("Bundle metering failed: {e}"),
                 None::<()>,
             )
         })?;
@@ -250,14 +250,14 @@ where
                 error!(error = %e, "Failed to get block by hash");
                 jsonrpsee::types::ErrorObjectOwned::owned(
                     jsonrpsee::types::ErrorCode::InternalError.code(),
-                    format!("Failed to get block: {}", e),
+                    format!("Failed to get block: {e}"),
                     None::<()>,
                 )
             })?
             .ok_or_else(|| {
                 jsonrpsee::types::ErrorObjectOwned::owned(
                     jsonrpsee::types::ErrorCode::InvalidParams.code(),
-                    format!("Block not found: {}", hash),
+                    format!("Block not found: {hash}"),
                     None::<()>,
                 )
             })?;
@@ -289,14 +289,14 @@ where
                 error!(error = %e, "Failed to get block by number");
                 jsonrpsee::types::ErrorObjectOwned::owned(
                     jsonrpsee::types::ErrorCode::InternalError.code(),
-                    format!("Failed to get block: {}", e),
+                    format!("Failed to get block: {e}"),
                     None::<()>,
                 )
             })?
             .ok_or_else(|| {
                 jsonrpsee::types::ErrorObjectOwned::owned(
                     jsonrpsee::types::ErrorCode::InvalidParams.code(),
-                    format!("Block not found: {:?}", number),
+                    format!("Block not found: {number:?}"),
                     None::<()>,
                 )
             })?;
@@ -343,7 +343,7 @@ where
                 error!(error = %e, block = ?block_id, "Failed to get block");
                 jsonrpsee::types::ErrorObjectOwned::owned(
                     jsonrpsee::types::ErrorCode::InternalError.code(),
-                    format!("Failed to get block: {}", e),
+                    format!("Failed to get block: {e}"),
                     None::<()>,
                 )
             })?
@@ -369,7 +369,7 @@ where
         extract_l1_info_from_tx(&first_tx).map_err(|e| {
             jsonrpsee::types::ErrorObjectOwned::owned(
                 jsonrpsee::types::ErrorCode::InvalidParams.code(),
-                format!("Failed to extract L1 block info from transaction: {}", e),
+                format!("Failed to extract L1 block info from transaction: {e}"),
                 None::<()>,
             )
         })
@@ -381,7 +381,7 @@ where
             error!(error = %e, "Block metering failed");
             jsonrpsee::types::ErrorObjectOwned::owned(
                 jsonrpsee::types::ErrorCode::InternalError.code(),
-                format!("Block metering failed: {}", e),
+                format!("Block metering failed: {e}"),
                 None::<()>,
             )
         })
@@ -765,7 +765,7 @@ mod tests {
         use alloy_consensus::Header;
         use alloy_primitives::{B256, Bloom};
         use base_flashblocks::{FlashblocksConfig, PendingBlocksBuilder};
-        use base_flashtypes::{
+        use base_primitives::{
             ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
         };
         use url::Url;

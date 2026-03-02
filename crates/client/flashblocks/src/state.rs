@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use alloy_consensus::Header;
 use arc_swap::{ArcSwapOption, Guard};
-use base_flashtypes::Flashblock;
+use base_primitives::Flashblock;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_optimism_chainspec::OpHardforks;
 use reth_optimism_primitives::OpBlock;
@@ -67,9 +67,9 @@ impl FlashblocksState {
     {
         let state_processor = StateProcessor::new(
             client,
-            self.pending_blocks.clone(),
+            Arc::clone(&self.pending_blocks),
             self.max_pending_blocks_depth,
-            self.rx.clone(),
+            Arc::clone(&self.rx),
             self.flashblock_sender.clone(),
         );
 

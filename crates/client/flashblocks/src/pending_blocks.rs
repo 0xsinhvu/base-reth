@@ -7,10 +7,10 @@ use alloy_primitives::{
     map::foldhash::{HashMap, HashMapExt},
 };
 use alloy_provider::network::TransactionResponse;
-use alloy_rpc_types::{BlockTransactions, state::StateOverride};
+use alloy_rpc_types::{BlockTransactions, Withdrawal, state::StateOverride};
 use alloy_rpc_types_eth::{Filter, Header as RPCHeader, Log};
 use arc_swap::Guard;
-use base_flashtypes::Flashblock;
+use base_primitives::Flashblock;
 use op_alloy_network::Optimism;
 use op_alloy_rpc_types::{OpTransactionReceipt, Transaction};
 use reth_revm::db::BundleState;
@@ -138,16 +138,11 @@ impl PendingBlocksBuilder {
 
     /// Builds the pending blocks.
     pub fn build(self) -> Result<PendingBlocks, StateProcessorError> {
-        if self.headers.is_empty() {
-            return Err(BuildError::MissingHeaders.into());
-        }
+        let earliest_header = self.headers.first().cloned().ok_or(BuildError::MissingHeaders)?;
+        let latest_header = self.headers.last().cloned().ok_or(BuildError::MissingHeaders)?;
 
-        if self.flashblocks.is_empty() {
-            return Err(BuildError::NoFlashblocks.into());
-        }
-
-        let latest_header = self.headers.last().cloned().unwrap();
-        let latest_flashblock_index =self.flashblocks.last().map(|fb| fb.index).unwrap();
+        let latest_flashblock_index =
+            self.flashblocks.last().map(|fb| fb.index).ok_or(BuildError::NoFlashblocks)?;
 
         let mut state_overrides_cutoff = self.state_overrides.clone().unwrap_or_default();
         state_overrides_cutoff.retain(|_, acc| {
@@ -175,8 +170,10 @@ impl PendingBlocksBuilder {
         }
 
         Ok(PendingBlocks {
+            earliest_header,
+            latest_header,
+            latest_flashblock_index,
             flashblocks: self.flashblocks,
-            headers: self.headers,
             transactions: self.transactions,
             account_balances: self.account_balances,
             transaction_count: self.transaction_count,
@@ -194,8 +191,10 @@ impl PendingBlocksBuilder {
 /// Aggregated pending block state from flashblocks.
 #[derive(Debug, Clone)]
 pub struct PendingBlocks {
+    earliest_header: Sealed<Header>,
+    latest_header: Sealed<Header>,
+    latest_flashblock_index: u64,
     flashblocks: Vec<Flashblock>,
-    headers: Vec<Sealed<Header>>,
     transactions: Vec<Transaction>,
 
     account_balances: HashMap<Address, U256>,
@@ -212,28 +211,33 @@ pub struct PendingBlocks {
 
 impl PendingBlocks {
     /// Returns the latest block number in the pending state.
+    #[inline]
     pub fn latest_block_number(&self) -> BlockNumber {
-        self.headers.last().unwrap().number
+        self.latest_header.number
     }
 
     /// Returns the canonical block number (the block before pending).
+    #[inline]
     pub fn canonical_block_number(&self) -> BlockNumberOrTag {
-        BlockNumberOrTag::Number(self.headers.first().unwrap().number - 1)
+        BlockNumberOrTag::Number(self.earliest_header.number - 1)
     }
 
     /// Returns the earliest block number in the pending state.
+    #[inline]
     pub fn earliest_block_number(&self) -> BlockNumber {
-        self.headers.first().unwrap().number
+        self.earliest_header.number
     }
 
     /// Returns the index of the latest flashblock.
-    pub fn latest_flashblock_index(&self) -> u64 {
-        self.flashblocks.last().unwrap().index
+    #[inline]
+    pub const fn latest_flashblock_index(&self) -> u64 {
+        self.latest_flashblock_index
     }
 
     /// Returns the latest header.
+    #[inline]
     pub fn latest_header(&self) -> Sealed<Header> {
-        self.headers.last().unwrap().clone()
+        self.latest_header.clone()
     }
 
     /// Returns all flashblocks.
@@ -248,12 +252,12 @@ impl PendingBlocks {
 
     /// Returns the sender of a transaction.
     pub fn get_transaction_sender(&self, tx_hash: &B256) -> Option<Address> {
-        self.transaction_senders.get(tx_hash).cloned()
+        self.transaction_senders.get(tx_hash).copied()
     }
 
     /// Returns a clone of the bundle state.
     ///
-    /// NOTE: This clones the entire BundleState, which contains a HashMap of all touched
+    /// NOTE: This clones the entire `BundleState`, which contains a `HashMap` of all touched
     /// accounts and their storage slots. The cost scales with the number of accounts and
     /// storage slots modified in the flashblock. Monitor `bundle_state_clone_duration` and
     /// `bundle_state_clone_size` metrics to track if this becomes a bottleneck.
@@ -276,6 +280,11 @@ impl PendingBlocks {
             .collect()
     }
 
+    /// Returns all withdrawals collected from flashblocks.
+    fn get_withdrawals(&self) -> Vec<Withdrawal> {
+        self.flashblocks.iter().flat_map(|fb| fb.diff.withdrawals.clone()).collect()
+    }
+
     /// Returns the latest block, optionally with full transaction details.
     pub fn get_latest_block(&self, full: bool) -> RpcBlock<Optimism> {
         let header = self.latest_header();
@@ -293,7 +302,7 @@ impl PendingBlocks {
             header: RPCHeader::from_consensus(header, None, None),
             transactions,
             uncles: Vec::new(),
-            withdrawals: None,
+            withdrawals: Some(self.get_withdrawals().into()),
         }
     }
 
@@ -309,12 +318,12 @@ impl PendingBlocks {
 
     /// Returns the transaction count for an address in pending state.
     pub fn get_transaction_count(&self, address: Address) -> U256 {
-        self.transaction_count.get(&address).cloned().unwrap_or(U256::from(0))
+        self.transaction_count.get(&address).copied().unwrap_or_else(|| U256::from(0))
     }
 
     /// Returns the balance for an address in pending state.
     pub fn get_balance(&self, address: Address) -> Option<U256> {
-        self.account_balances.get(&address).cloned()
+        self.account_balances.get(&address).copied()
     }
 
     /// Returns the state overrides for the pending state.

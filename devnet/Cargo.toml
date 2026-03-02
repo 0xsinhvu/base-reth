@@ -1,0 +1,86 @@
+[package]
+name = "devnet"
+description = "System/E2E tests for Base node infrastructure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "devnet"
+path = "src/bin/devnet.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace
+base-txpool-rpc.workspace = true
+base-txpool-tracing.workspace = true
+base-flashblocks.workspace = true
+base-primitives.workspace = true
+base-flashblocks-node.workspace = true
+base-protocol = { workspace = true, features = ["serde"] }
+base-consensus-rpc = { workspace = true, features = ["client"] }
+base-builder-core = { workspace = true, features = ["test-utils"] }
+base-client-node = { workspace = true, features = ["test-utils"] }
+
+# reth
+reth-tasks.workspace = true
+reth-provider.workspace = true
+reth-node-core.workspace = true
+reth-optimism-rpc.workspace = true
+reth-optimism-node.workspace = true
+reth-optimism-txpool.workspace = true
+reth-optimism-chainspec.workspace = true
+reth-db = { workspace = true, features = ["op"] }
+reth-node-builder = { workspace = true, features = ["test-utils"] }
+
+# alloy
+alloy-genesis.workspace = true
+alloy-network.workspace = true
+alloy-rpc-types.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-client.workspace = true
+alloy-rpc-types-engine.workspace = true
+alloy-provider = { workspace = true, features = ["reqwest"] }
+alloy-signer-local = { workspace = true, features = ["mnemonic"] }
+
+# op-alloy
+op-alloy-network.workspace = true
+
+# tokio
+tokio = { workspace = true, features = ["full", "rt-multi-thread", "macros"] }
+tokio-tungstenite = { workspace = true, features = ["native-tls"] }
+
+# async
+futures-util.workspace = true
+
+# rpc
+jsonrpsee = { workspace = true, features = ["http-client"] }
+
+# cli
+url.workspace = true
+clap.workspace = true
+
+# misc
+hex.workspace = true
+eyre.workspace = true
+rand.workspace = true
+nanoid.workspace = true
+tracing.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
+serde = { workspace = true, features = ["derive"] }
+testcontainers = { workspace = true, features = ["blocking", "host-port-exposure"] }
+
+[dev-dependencies]
+# alloy
+alloy-eips.workspace = true
+alloy-signer.workspace = true
+alloy-consensus.workspace = true
+
+# op-alloy
+op-alloy-rpc-types.workspace = true

@@ -10,7 +10,7 @@ use alloy_primitives::{Address, B256, BlockNumber, Bytes, U256, bytes, hex::From
 use alloy_rpc_types_engine::PayloadId;
 use base_client_node::test_utils::{Account, LocalNodeProvider, TestHarness};
 use base_flashblocks::{FlashblocksAPI, FlashblocksReceiver, FlashblocksState};
-use base_flashtypes::{
+use base_primitives::{
     ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
 };
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
@@ -57,7 +57,7 @@ impl BenchSetup {
             .map(|count| {
                 let txs = sample_transactions(&provider, *count);
                 let blocks = build_flashblocks(&canonical_block, &txs);
-                (format!("pending_state_{}_txs", count), blocks)
+                (format!("pending_state_{count}_txs"), blocks)
             })
             .collect();
 
@@ -137,7 +137,7 @@ fn init_bench_tracing() {
         let mut filter =
             EnvFilter::builder().with_default_directive(default_level.into()).from_env_lossy();
 
-        for directive in ["reth_tasks=off", "reth_node_builder::launch::common=off"].into_iter() {
+        for directive in ["reth_tasks=off", "reth_node_builder::launch::common=off"] {
             if let Ok(directive) = directive.parse() {
                 filter = filter.add_directive(directive);
             }

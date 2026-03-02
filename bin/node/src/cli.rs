@@ -1,6 +1,6 @@
 //! Contains the CLI arguments
 
-use base_flashblocks_node::FlashblocksConfig;
+use base_flashblocks::FlashblocksConfig;
 use reth_optimism_node::args::RollupArgs;
 
 /// CLI Arguments
@@ -43,10 +43,11 @@ impl Args {
     }
 }
 
-impl From<Args> for Option<FlashblocksConfig> {
-    fn from(args: Args) -> Self {
+impl From<&Args> for Option<FlashblocksConfig> {
+    fn from(args: &Args) -> Self {
         args.rollup_args
             .flashblocks_url
+            .clone()
             .map(|url| FlashblocksConfig::new(url, args.max_pending_blocks_depth))
     }
 }

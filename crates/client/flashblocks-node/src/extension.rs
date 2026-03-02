@@ -1,14 +1,14 @@
 //! Contains the [`FlashblocksExtension`] which wires up the flashblocks feature
 //! (canonical block subscription and RPC surface) on the Base node builder.
 
-use base_client_engine::BaseEngineValidatorBuilder;
-use base_client_node::{BaseBuilder, BaseNodeExtension, FromExtensionConfig};
+use std::sync::Arc;
+
+use base_client_node::{BaseNodeExtension, FromExtensionConfig, NodeHooks};
 use base_flashblocks::{
     EthApiExt, EthApiOverrideServer, EthPubSub, EthPubSubApiServer, FlashblocksConfig,
     FlashblocksSubscriber,
 };
 use reth_chain_state::CanonStateSubscriptions;
-use reth_optimism_node::OpEngineValidatorBuilder;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tracing::info;
 
@@ -27,31 +27,22 @@ impl FlashblocksExtension {
 }
 
 impl BaseNodeExtension for FlashblocksExtension {
-    /// Applies the extension to the supplied builder.
-    fn apply(self: Box<Self>, mut builder: BaseBuilder) -> BaseBuilder {
+    /// Applies the extension to the supplied hooks.
+    fn apply(self: Box<Self>, hooks: NodeHooks) -> NodeHooks {
         let Some(cfg) = self.config else {
             info!(message = "flashblocks integration is disabled");
-            return builder;
+            return hooks;
         };
 
         let state = cfg.state;
-        let mut subscriber = FlashblocksSubscriber::new(state.clone(), cfg.websocket_url);
+        let mut subscriber = FlashblocksSubscriber::new(Arc::clone(&state), cfg.websocket_url);
 
-        let engine_validator_state = state.clone();
-
-        builder = builder.map_add_ons(move |add_ons| {
-            add_ons.with_engine_validator(
-                BaseEngineValidatorBuilder::<OpEngineValidatorBuilder>::default()
-                    .with_flashblocks_state(engine_validator_state),
-            )
-        });
-
-        let state_for_canonical = state.clone();
-        let state_for_rpc = state.clone();
+        let state_for_canonical = Arc::clone(&state);
+        let state_for_rpc = Arc::clone(&state);
         let state_for_start = state;
 
         // Start state processor, subscriber, and canonical subscription after node is started
-        let builder = builder.add_node_started_hook(move |ctx| {
+        let hooks = hooks.add_node_started_hook(move |ctx| {
             info!(message = "Starting Flashblocks state processor");
             state_for_start.start(ctx.provider().clone());
             subscriber.start();
@@ -71,13 +62,13 @@ impl BaseNodeExtension for FlashblocksExtension {
         });
 
         // Extend with RPC modules
-        builder.add_rpc_module(move |ctx| {
+        hooks.add_rpc_module(move |ctx| {
             info!(message = "Starting Flashblocks RPC");
 
             let api_ext = EthApiExt::new(
                 ctx.registry.eth_api().clone(),
                 ctx.registry.eth_handlers().filter.clone(),
-                state_for_rpc.clone(),
+                Arc::clone(&state_for_rpc),
             );
             ctx.modules.replace_configured(api_ext.into_rpc())?;
 
