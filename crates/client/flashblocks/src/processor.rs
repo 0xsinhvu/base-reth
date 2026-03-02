@@ -420,7 +420,7 @@ where
         pending_blocks_builder.with_historical_state_overrides(historical_state_overrides);
         pending_blocks_builder.with_state_overrides(state_overrides);
 
-        debug!(
+        info!(
             took = ?tracker.elapsed(),
             "built pending state",
         );
