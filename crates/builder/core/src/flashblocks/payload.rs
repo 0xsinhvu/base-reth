@@ -6,26 +6,27 @@ use std::{
 };
 
 use alloy_consensus::{
-    BlockBody, EMPTY_OMMER_ROOT_HASH, Header, constants::EMPTY_WITHDRAWALS, proofs,
+    BlockBody, EMPTY_OMMER_ROOT_HASH, Header, Transaction, constants::EMPTY_WITHDRAWALS, proofs,
 };
 use alloy_eips::{Encodable2718, eip7685::EMPTY_REQUESTS_HASH, merge::BEACON_NONCE};
 use alloy_evm::Database;
 use alloy_primitives::{Address, B256, U256, map::foldhash::HashMap};
 use base_access_lists::{FlashblockAccessList, FlashblockAccessListBuilder};
-use base_builder_publish::WebSocketPublisher;
-use base_primitives::{
+use base_alloy_flashblocks::{
     ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, FlashblocksPayloadV1,
 };
+use base_builder_publish::WebSocketPublisher;
+use base_execution_consensus::{calculate_receipt_root_no_memo_optimism, isthmus};
+use base_execution_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
+use base_execution_forks::OpHardforks;
+use base_execution_primitives::{OpReceipt, OpTransactionSigned};
+use base_node_core::{OpBuiltPayload, OpPayloadBuilderAttributes};
 use either::Either;
 use eyre::WrapErr as _;
 use reth_basic_payload_builder::BuildOutcome;
 use reth_evm::{ConfigureEvm, execute::BlockBuilder};
+use reth_execution_types::ChangedAccount;
 use reth_node_api::{Block, BuiltPayloadExecutedBlock, PayloadBuilderError};
-use reth_optimism_consensus::{calculate_receipt_root_no_memo_optimism, isthmus};
-use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
-use reth_optimism_forks::OpHardforks;
-use reth_optimism_node::{OpBuiltPayload, OpPayloadBuilderAttributes};
-use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
 use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_payload_util::BestPayloadTransactions;
 use reth_primitives_traits::RecoveredBlock;
@@ -38,6 +39,7 @@ use reth_revm::{
 };
 use reth_transaction_pool::TransactionPool;
 use reth_trie::{HashedPostState, updates::TrieUpdates};
+use revm::Database as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -156,7 +158,7 @@ where
     fn get_op_payload_builder_ctx(
         &self,
         config: reth_basic_payload_builder::PayloadConfig<
-            OpPayloadBuilderAttributes<op_alloy_consensus::OpTxEnvelope>,
+            OpPayloadBuilderAttributes<base_alloy_consensus::OpTxEnvelope>,
         >,
         cancel: CancellationToken,
         extra: FlashblocksExtraCtx,
@@ -168,7 +170,7 @@ where
             config
                 .attributes
                 .get_jovian_extra_data(chain_spec.base_fee_params_at_timestamp(timestamp))
-                .wrap_err("failed to get holocene extra data for flashblocks payload builder")?
+                .wrap_err("failed to get jovian extra data for flashblocks payload builder")?
         } else if chain_spec.is_holocene_active_at_timestamp(timestamp) {
             config
                 .attributes
@@ -326,8 +328,7 @@ where
             flashblocks_interval = self.config.flashblocks.interval.as_millis(),
         );
         ctx.metrics.reduced_flashblocks_number.record(
-            self.config.flashblocks_per_block().saturating_sub(ctx.target_flashblock_count())
-                as f64,
+            self.config.flashblocks_per_block().saturating_sub(flashblocks_per_block) as f64,
         );
         ctx.metrics.first_flashblock_time_offset.record(first_flashblock_offset.as_millis() as f64);
         let gas_per_batch = ctx.block_gas_limit() / flashblocks_per_block;
@@ -403,6 +404,9 @@ where
             }
         });
 
+        // Highest executed nonce per sender, updated incrementally per flashblock.
+        let mut executed_sender_nonces: HashMap<Address, u64> = HashMap::default();
+
         // Process flashblocks in a blocking loop
         loop {
             let fb_span = if span.is_none() {
@@ -441,6 +445,7 @@ where
                     &best_payload,
                     &publish_guard,
                     &fb_span,
+                    &mut executed_sender_nonces,
                 )
                 .await
             {
@@ -505,6 +510,7 @@ where
         best_payload: &BlockCell<OpBuiltPayload>,
         publish_guard: &parking_lot::Mutex<()>,
         span: &tracing::Span,
+        executed_sender_nonces: &mut HashMap<Address, u64>,
     ) -> eyre::Result<Option<FlashblocksExtraCtx>> {
         let flashblock_index = ctx.flashblock_index();
         let target_gas_for_batch = ctx.extra.target_gas_for_batch;
@@ -532,6 +538,28 @@ where
 
         info.reset_flashblock_execution_time();
 
+        // Correct the pool's sender nonce tracking before reading the next iterator.
+        // `prune_transactions` clears sender_info, causing nonce-continuation txs to
+        // land in `queued` instead of `pending` since the block isn't sealed yet.
+        if !executed_sender_nonces.is_empty() {
+            let changed_accounts: Vec<ChangedAccount> = executed_sender_nonces
+                .iter()
+                .map(|(&address, &nonce)| {
+                    // Fall back to zero balance on error — conservatively parks the tx until the next block resolves it.
+                    let balance = match state.basic(address) {
+                        Ok(Some(info)) => info.balance,
+                        Ok(None) => U256::ZERO,
+                        Err(e) => {
+                            warn!(address = %address, error = %e, "failed to read sender balance from state, defaulting to zero");
+                            U256::ZERO
+                        }
+                    };
+                    ChangedAccount { address, nonce: nonce + 1, balance }
+                })
+                .collect();
+            self.pool.update_accounts(changed_accounts);
+        }
+
         let best_txs_start_time = Instant::now();
         best_txs.refresh_iterator(BestPayloadTransactions::new(
             self.pool.best_transactions_with_attributes(ctx.best_transaction_attributes()),
@@ -554,11 +582,27 @@ where
         .wrap_err("failed to execute best transactions")?;
         // Extract last transactions
         let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..]
-            .to_vec()
             .iter()
             .map(|tx| tx.tx_hash())
             .collect::<Vec<_>>();
         best_txs.mark_committed(&new_transactions);
+        self.pool.prune_transactions(new_transactions);
+
+        // Track executed nonces incrementally for the next flashblock's update_accounts call.
+        debug_assert_eq!(
+            info.executed_transactions.len(),
+            info.executed_senders.len(),
+            "executed_transactions and executed_senders must be in lockstep"
+        );
+        for (tx, sender) in info.executed_transactions[info.extra.last_flashblock_index..]
+            .iter()
+            .zip(info.executed_senders[info.extra.last_flashblock_index..].iter())
+        {
+            executed_sender_nonces
+                .entry(*sender)
+                .and_modify(|n| *n = (*n).max(tx.nonce()))
+                .or_insert_with(|| tx.nonce());
+        }
 
         // We got block cancelled, we won't need anything from the block at this point
         // Caution: this assume that block cancel token only cancelled when new FCU is received
@@ -769,7 +813,7 @@ where
             );
         }
 
-        // We use this system time to determine remining time to build a block
+        // We use this system time to determine remaining time to build a block
         // Things to consider:
         // FCU(a) - FCU with attributes
         // FCU(a) could arrive with `block_time - fb_time < delay`. In this case we could only produce 1 flashblock
@@ -1067,8 +1111,6 @@ where
         block_number: ctx.parent().number + 1,
         access_list: None,
     };
-
-    let (_, blob_gas_used) = ctx.blob_fields(info);
 
     // Prepare the flashblocks message
     let fb_payload = FlashblocksPayloadV1 {

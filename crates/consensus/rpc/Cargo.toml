@@ -11,18 +11,54 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+# Workspace
+base-consensus-gossip.workspace = true
+base-consensus-engine.workspace = true
+base-macros.workspace = true
+base-consensus-genesis = { workspace = true, features = ["serde", "std"] }
+base-protocol = { workspace = true, features = ["serde", "std"] }
+
+# Base Alloy
+base-alloy-rpc-jsonrpsee.workspace = true
+base-alloy-rpc-types-engine = { workspace = true, features = ["serde", "std"] }
+
+# Alloy
+alloy-eips = { workspace = true, features = ["serde", "std"] }
+alloy-primitives = { workspace = true, features = ["map", "rlp", "serde", "std"] }
+
+# Misc
+ipnet.workspace = true
+backon.workspace = true
+libp2p.workspace = true
+tracing = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["time"] }
+serde = { workspace = true, features = ["std"] }
+
+# RPC
+jsonrpsee = { workspace = true, features = ["macros", "server"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
+
+# Optional
+metrics = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true, features = ["std"] }
+
 [features]
-default = [ "std" ]
-std = [ "base-protocol/std" ]
+default = []
+reqwest = [ "client" ]
 client = [
+	"base-alloy-rpc-jsonrpsee/client",
 	"jsonrpsee/async-client",
 	"jsonrpsee/client",
 	"jsonrpsee/http-client",
 ]
-
-[dependencies]
-# workspace
-base-protocol = { workspace = true, features = ["serde"] }
-
-# rpc
-jsonrpsee = { workspace = true, features = ["macros", "server"] }
+metrics = [
+	"base-consensus-engine/metrics",
+	"base-consensus-gossip/metrics",
+	"dep:metrics",
+	"libp2p/metrics",
+]

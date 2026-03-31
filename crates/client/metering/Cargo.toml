@@ -15,31 +15,29 @@ workspace = true
 # workspace
 base-bundles.workspace = true
 base-flashblocks.workspace = true
-base-client-node.workspace = true
+base-node-runner.workspace = true
 
 # reth
 reth-evm.workspace = true
 reth-revm.workspace = true
 reth-provider.workspace = true
 reth-trie-common.workspace = true
-reth-optimism-evm.workspace = true
+base-execution-evm.workspace = true
 reth-primitives-traits.workspace = true
-reth-optimism-chainspec.workspace = true
-reth-optimism-primitives.workspace = true
+base-execution-chainspec.workspace = true
+base-execution-primitives.workspace = true
 
 # revm
 revm-database.workspace = true
 
-# op-revm
-op-revm.workspace = true
+# base-revm
+base-revm.workspace = true
 
 # alloy
-alloy-eips.workspace = true
-alloy-consensus.workspace = true
+alloy-eips = { workspace = true, features = ["std"] }
+alloy-consensus = { workspace = true, features = ["std"] }
 alloy-primitives.workspace = true
-
-# op-alloy
-op-alloy-consensus.workspace = true
+alloy-rpc-types-engine.workspace = true
 
 # rpc
 jsonrpsee.workspace = true
@@ -50,33 +48,34 @@ metrics-derive.workspace = true
 
 # misc
 eyre.workspace = true
-serde.workspace = true
-tracing.workspace = true
+serde = { workspace = true, features = ["std"] }
+tracing = { workspace = true, features = ["std"] }
 arc-swap.workspace = true
 derive_more.workspace = true
 
 [dev-dependencies]
 # workspace
 base-flashblocks.workspace = true
-base-primitives.workspace = true
-base-client-node = { workspace = true, features = ["test-utils"] }
+base-alloy-flashblocks.workspace = true
+base-node-runner = { workspace = true, features = ["test-utils"] }
 
 # reth
 reth-db-common.workspace = true
-reth-optimism-node.workspace = true
-reth-db = { workspace = true, features = ["op", "test-utils"] }
+base-node-core.workspace = true
+reth-db = { workspace = true, features = ["test-utils"] }
 reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 
 # revm
+revm-bytecode.workspace = true
 revm-context-interface.workspace = true
 
 # alloy
-alloy-genesis.workspace = true
+alloy-genesis = { workspace = true, features = ["std"] }
 alloy-rpc-client.workspace = true
 
-# op-alloy
-op-alloy-network.workspace = true
-op-alloy-consensus.workspace = true
+# base-alloy
+base-alloy-network.workspace = true
+base-alloy-consensus.workspace = true
 
 # misc
 url.workspace = true

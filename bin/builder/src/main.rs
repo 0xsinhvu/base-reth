@@ -5,11 +5,13 @@
 
 pub mod cli;
 
-use base_builder_core::{BuilderConfig, FlashblocksServiceBuilder};
+use std::sync::Arc;
+
+use base_builder_core::FlashblocksServiceBuilder;
 use base_builder_metering::MeteringStoreExtension;
-use base_client_node::BaseNodeRunner;
+use base_execution_cli::{Cli, chainspec::OpChainSpecParser};
+use base_node_runner::BaseNodeRunner;
 use base_txpool_rpc::{TxPoolRpcConfig, TxPoolRpcExtension};
-use reth_optimism_cli::{Cli, chainspec::OpChainSpecParser};
 
 type BuilderCli = Cli<OpChainSpecParser, cli::Args>;
 
@@ -23,13 +25,16 @@ fn main() {
     let cli = base_cli_utils::parse_cli!(BuilderCli);
 
     cli.run(|builder, builder_args| async move {
-        let builder_config = BuilderConfig::try_from(builder_args.clone())
+        let metering_provider: base_builder_core::SharedMeteringProvider =
+            Arc::new(builder_args.build_metering_store());
+        let rollup_args = builder_args.rollup_args.clone();
+        let builder_config = builder_args
+            .into_builder_config(Arc::clone(&metering_provider))
             .expect("Failed to convert rollup args to builder config");
-        let metering_store = builder_args.build_metering_store();
 
-        let mut runner = BaseNodeRunner::new(builder_args.rollup_args.clone())
+        let mut runner = BaseNodeRunner::new(rollup_args)
             .with_service_builder(FlashblocksServiceBuilder(builder_config));
-        runner.install_ext::<MeteringStoreExtension>(metering_store);
+        runner.install_ext::<MeteringStoreExtension>(metering_provider);
         runner.install_ext::<TxPoolRpcExtension>(TxPoolRpcConfig::default());
 
         runner.run(builder).await

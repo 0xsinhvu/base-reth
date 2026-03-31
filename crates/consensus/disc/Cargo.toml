@@ -1,0 +1,46 @@
+[package]
+name = "base-consensus-disc"
+version.workspace = true
+description = "Discovery service for the OP Stack"
+
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# consensus
+base-consensus-peers.workspace = true
+base-macros.workspace = true
+base-consensus-genesis.workspace = true
+
+# Alloy
+alloy-rlp = { workspace = true, features = ["std"] }
+
+# Networking
+discv5 = { workspace = true, features = ["libp2p"] }
+libp2p.workspace = true
+
+# Misc
+tokio.workspace = true
+tracing = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+derive_more.workspace = true
+backon = { workspace = true, features = ["std", "tokio", "tokio-sleep"] }
+rand = { workspace = true, features = ["thread_rng"] }
+
+# `metrics` feature
+metrics = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+base-cli-utils.workspace = true
+serde_json = { workspace = true, features = ["std"] }
+
+[features]
+default = []
+metrics = [ "dep:metrics", "libp2p/metrics" ]

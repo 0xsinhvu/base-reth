@@ -4,14 +4,26 @@ set -euo pipefail
 # Disallowed crate dependency rules: "source:target"
 # Crates in crates/<source>/ must not depend on crates in crates/<target>/
 DISALLOWED_DEPS=(
-  "shared:client"
-  "shared:builder"
-  "shared:consensus"
+  "utilities:client"
+  "utilities:builder"
+  "utilities:consensus"
   "client:infra"
-  "shared:infra"
+  "utilities:infra"
   "builder:infra"
   "consensus:infra"
 )
+
+# Allowed exceptions: "dep_name" entries here are excluded from all rules.
+# These are foundational consensus protocol crates that are local path deps under crates/consensus/.
+ALLOWED_DEPS=(
+  "base-consensus-genesis"
+  "base-consensus-registry"
+  "base-consensus-engine"
+)
+
+# Build a jq filter string for allowed deps
+ALLOWED_FILTER=$(printf '"%s",' "${ALLOWED_DEPS[@]}")
+ALLOWED_FILTER="[${ALLOWED_FILTER%,}]"
 
 # Fetch cargo metadata once
 METADATA=$(cargo metadata --format-version 1 --no-deps)
@@ -22,13 +34,14 @@ for rule in "${DISALLOWED_DEPS[@]}"; do
   SOURCE="${rule%%:*}"
   TARGET="${rule##*:}"
 
-  VIOLATIONS=$(echo "$METADATA" | jq -r "
+  VIOLATIONS=$(echo "$METADATA" | jq -r --argjson allowed "$ALLOWED_FILTER" "
     [.packages[]
      | select(.manifest_path | contains(\"/crates/$SOURCE/\"))
      | . as \$pkg
      | .dependencies[]
      | select(.path)
      | select(.path | contains(\"/crates/$TARGET/\"))
+     | select(.name as \$n | \$allowed | index(\$n) | not)
      | \"\(\$pkg.name) -> \(.name)\"
     ]
     | .[]

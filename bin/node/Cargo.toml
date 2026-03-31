@@ -8,6 +8,10 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "base-reth-node"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
@@ -18,18 +22,19 @@ base-txpool-tracing.workspace = true
 base-metering.workspace = true
 base-cli-utils.workspace = true
 base-flashblocks.workspace = true
-base-client-node.workspace = true
+base-node-runner.workspace = true
 base-flashblocks-node.workspace = true
 base-proofs-extension.workspace = true
 
 # reth
 reth-cli-util.workspace = true
-reth-optimism-node.workspace = true
-reth-optimism-cli = { workspace = true, features = ["otlp"] }
+base-node-core.workspace = true
+base-execution-cli = { workspace = true, features = ["otlp"] }
 
 # cli
 clap.workspace = true
+url.workspace = true
 
 [features]
 default = [ "jemalloc" ]
-jemalloc = [ "reth-cli-util/jemalloc", "reth-optimism-cli/jemalloc" ]
+jemalloc = [ "base-execution-cli/jemalloc", "reth-cli-util/jemalloc" ]

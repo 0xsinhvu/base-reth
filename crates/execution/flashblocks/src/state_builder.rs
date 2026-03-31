@@ -1,0 +1,494 @@
+use std::sync::Arc;
+
+use alloy_consensus::{
+    Block, Header, TxReceipt,
+    transaction::{Recovered, TransactionMeta},
+};
+use alloy_eips::Encodable2718;
+use alloy_primitives::B256;
+use alloy_rpc_types::TransactionTrait;
+use alloy_rpc_types_eth::state::StateOverride;
+use base_alloy_consensus::{OpReceipt, OpTxEnvelope};
+use base_alloy_rpc_types::{OpTransactionReceipt, Transaction};
+use base_execution_forks::OpHardforks;
+use base_execution_primitives::OpPrimitives;
+use base_execution_rpc::OpReceiptBuilder as OpRpcReceiptBuilder;
+use base_revm::{L1_BLOCK_CONTRACT, L1BlockInfo, OpHaltReason, estimate_tx_compressed_size};
+use reth_evm::{Evm, FromRecoveredTx};
+use reth_rpc_convert::transaction::ConvertReceiptInput;
+use revm::{
+    Database, DatabaseCommit,
+    context::{
+        Block as _,
+        result::{ExecutionResult, ResultAndState},
+    },
+    state::EvmState,
+};
+
+use crate::{ExecutionError, PendingBlocks, StateProcessorError, UnifiedReceiptBuilder};
+
+/// Represents the result of executing or fetching a cached pending transaction.
+#[derive(Debug, Clone)]
+pub struct ExecutedPendingTransaction {
+    /// The RPC transaction.
+    pub rpc_transaction: Transaction,
+    /// The receipt of the transaction.
+    pub receipt: OpTransactionReceipt,
+    /// The updated EVM state.
+    pub state: EvmState,
+    /// The execution result of the transaction.
+    pub result: ExecutionResult<OpHaltReason>,
+}
+
+/// Executes or fetches cached values for transactions in a flashblock.
+#[derive(Debug)]
+pub struct PendingStateBuilder<E, ChainSpec> {
+    cumulative_gas_used: u64,
+    next_log_index: usize,
+
+    evm: E,
+    pending_block: Block<OpTxEnvelope, Header>,
+    l1_block_info: L1BlockInfo,
+    receipt_builder: UnifiedReceiptBuilder<ChainSpec>,
+    chain_spec: ChainSpec,
+
+    prev_pending_blocks: Option<Arc<PendingBlocks>>,
+    state_overrides: StateOverride,
+}
+
+impl<E, ChainSpec, DB> PendingStateBuilder<E, ChainSpec>
+where
+    E: Evm<DB = DB, HaltReason = OpHaltReason>,
+    DB: Database + DatabaseCommit,
+    E::Tx: FromRecoveredTx<OpTxEnvelope>,
+    ChainSpec: OpHardforks + Clone,
+{
+    /// Creates a new pending state builder.
+    pub fn new(
+        chain_spec: ChainSpec,
+        evm: E,
+        pending_block: Block<OpTxEnvelope, Header>,
+        prev_pending_blocks: Option<Arc<PendingBlocks>>,
+        l1_block_info: L1BlockInfo,
+        state_overrides: StateOverride,
+    ) -> Self {
+        Self {
+            pending_block,
+            evm,
+            cumulative_gas_used: 0,
+            next_log_index: 0,
+            prev_pending_blocks,
+            l1_block_info,
+            state_overrides,
+            chain_spec: chain_spec.clone(),
+            receipt_builder: UnifiedReceiptBuilder::new(chain_spec),
+        }
+    }
+
+    /// Consumes the builder and returns the database and state overrides.
+    pub fn into_db_and_state_overrides(self) -> (DB, StateOverride) {
+        (self.evm.into_db(), self.state_overrides)
+    }
+
+    /// Executes a single transaction and updates internal state.
+    /// Should be called in order for each transaction.
+    pub fn execute_transaction(
+        &mut self,
+        idx: usize,
+        transaction: Recovered<OpTxEnvelope>,
+    ) -> Result<ExecutedPendingTransaction, StateProcessorError> {
+        let tx_hash = transaction.tx_hash();
+
+        let effective_gas_price = if transaction.is_deposit() {
+            0
+        } else {
+            self.pending_block
+                .base_fee_per_gas
+                .map(|base_fee| {
+                    transaction.effective_tip_per_gas(base_fee).unwrap_or_default()
+                        + base_fee as u128
+                })
+                .unwrap_or_else(|| transaction.max_fee_per_gas())
+        };
+
+        // Check if we have all the data we need (receipt + state)
+        let cached_data = self.prev_pending_blocks.as_ref().and_then(|p| {
+            let receipt = p.get_receipt(tx_hash)?;
+            let state = p.get_transaction_state(&tx_hash)?;
+            let result = p.get_transaction_result(&tx_hash)?;
+            Some((receipt, state, result))
+        });
+
+        // If cached, we can fill out pending block data using previous execution results
+        // If not cached, we need to execute the transaction and build pending block data from scratch
+        if let Some((receipt, state, result)) = cached_data {
+            self.execute_with_cached_data(
+                transaction,
+                receipt.clone(),
+                state,
+                result.clone(),
+                idx,
+                effective_gas_price,
+            )
+        } else {
+            self.execute_with_evm(transaction, idx, effective_gas_price)
+        }
+    }
+
+    /// Builds transaction result from cached receipt and state data.
+    fn execute_with_cached_data(
+        &mut self,
+        transaction: Recovered<OpTxEnvelope>,
+        receipt: OpTransactionReceipt,
+        state: EvmState,
+        result: ExecutionResult<OpHaltReason>,
+        idx: usize,
+        effective_gas_price: u128,
+    ) -> Result<ExecutedPendingTransaction, StateProcessorError> {
+        let (deposit_receipt_version, deposit_nonce) = if transaction.is_deposit() {
+            let OpReceipt::Deposit(deposit_receipt) = &receipt.inner.inner.receipt else {
+                return Err(ExecutionError::DepositReceiptMismatch.into());
+            };
+
+            (deposit_receipt.deposit_receipt_version, deposit_receipt.deposit_nonce)
+        } else {
+            (None, None)
+        };
+
+        let rpc_transaction = Transaction {
+            inner: alloy_rpc_types_eth::Transaction {
+                inner: transaction,
+                block_hash: None,
+                block_number: Some(self.pending_block.number),
+                transaction_index: Some(idx as u64),
+                effective_gas_price: Some(effective_gas_price),
+            },
+            deposit_nonce,
+            deposit_receipt_version,
+        };
+
+        self.cumulative_gas_used = self
+            .cumulative_gas_used
+            .checked_add(receipt.inner.gas_used)
+            .ok_or(ExecutionError::GasOverflow)?;
+        self.next_log_index += receipt.inner.logs().len();
+
+        Ok(ExecutedPendingTransaction { rpc_transaction, receipt, state, result })
+    }
+
+    fn jovian_da_footprint_estimation(
+        &mut self,
+        tx_env: &Recovered<OpTxEnvelope>,
+    ) -> Result<u64, StateProcessorError> {
+        // Try to use the enveloped tx if it exists, otherwise use the encoded 2718 bytes
+        let encoded = estimate_tx_compressed_size(tx_env.into_encoded().encoded_bytes())
+            .saturating_div(1_000_000);
+
+        // Load the L1 block contract into the cache. If the L1 block contract is not pre-loaded the
+        // database will panic when trying to fetch the DA footprint gas scalar.
+        self.evm.db_mut().basic(L1_BLOCK_CONTRACT).map_err(|err| {
+            StateProcessorError::Execution(ExecutionError::DaFootprintEstimation(err.to_string()))
+        })?;
+
+        let da_footprint_gas_scalar = L1BlockInfo::fetch_da_footprint_gas_scalar(self.evm.db_mut())
+            .map_err(|err| {
+                StateProcessorError::Execution(ExecutionError::DaFootprintEstimation(
+                    err.to_string(),
+                ))
+            })?
+            .into();
+
+        Ok(encoded.saturating_mul(da_footprint_gas_scalar))
+    }
+
+    /// Executes the transaction through the EVM and builds the result from scratch.
+    fn execute_with_evm(
+        &mut self,
+        transaction: Recovered<OpTxEnvelope>,
+        idx: usize,
+        effective_gas_price: u128,
+    ) -> Result<ExecutedPendingTransaction, StateProcessorError> {
+        let tx_hash = transaction.tx_hash();
+
+        let is_deposit = transaction.is_deposit();
+
+        let da_footprint_used = if self
+            .chain_spec
+            .is_jovian_active_at_timestamp(self.evm.block().timestamp().saturating_to())
+            && !is_deposit
+        {
+            self.jovian_da_footprint_estimation(&transaction)?
+        } else {
+            0
+        };
+
+        match self.evm.transact(&transaction) {
+            Ok(ResultAndState { state, result }) => {
+                let gas_used = result.gas_used();
+                for (addr, acc) in &state {
+                    let existing_override = self.state_overrides.entry(*addr).or_default();
+                    existing_override.balance = Some(acc.info.balance);
+                    existing_override.nonce = Some(acc.info.nonce);
+                    existing_override.code = acc.info.code.clone().map(|code| code.bytes());
+
+                    let existing =
+                        existing_override.state_diff.get_or_insert_with(Default::default);
+                    let changed_slots = acc
+                        .storage
+                        .iter()
+                        .map(|(&key, slot)| (B256::from(key), B256::from(slot.present_value)));
+
+                    existing.extend(changed_slots);
+                }
+
+                self.cumulative_gas_used = self
+                    .cumulative_gas_used
+                    .checked_add(gas_used)
+                    .ok_or(ExecutionError::GasOverflow)?;
+
+                // Build receipt using the unified receipt builder - handles both
+                // deposit and non-deposit transactions seamlessly
+                let receipt = self.receipt_builder.build(
+                    &mut self.evm,
+                    &transaction,
+                    &result,
+                    self.cumulative_gas_used,
+                    self.pending_block.timestamp,
+                )?;
+
+                let meta = TransactionMeta {
+                    tx_hash,
+                    index: idx as u64,
+                    block_hash: B256::ZERO, // block hash is not available yet for flashblocks
+                    block_number: self.pending_block.number,
+                    base_fee: self.pending_block.base_fee_per_gas,
+                    excess_blob_gas: self.pending_block.excess_blob_gas,
+                    timestamp: self.pending_block.timestamp,
+                };
+
+                let sender = transaction.signer();
+                let input: ConvertReceiptInput<'_, OpPrimitives> = ConvertReceiptInput {
+                    receipt: receipt.clone(),
+                    tx: Recovered::new_unchecked(&transaction, sender),
+                    gas_used,
+                    next_log_index: self.next_log_index,
+                    meta,
+                };
+
+                let mut op_receipt = OpRpcReceiptBuilder::new(
+                    self.receipt_builder.chain_spec(),
+                    input,
+                    &mut self.l1_block_info,
+                )
+                .map_err(|e| ExecutionError::RpcReceiptBuild(e.to_string()))?
+                .build();
+
+                op_receipt.inner.blob_gas_used = Some(da_footprint_used);
+                self.next_log_index += receipt.logs().len();
+
+                let (deposit_receipt_version, deposit_nonce) = if transaction.is_deposit() {
+                    let OpReceipt::Deposit(deposit_receipt) = &op_receipt.inner.inner.receipt
+                    else {
+                        return Err(ExecutionError::DepositReceiptMismatch.into());
+                    };
+
+                    (deposit_receipt.deposit_receipt_version, deposit_receipt.deposit_nonce)
+                } else {
+                    (None, None)
+                };
+
+                let rpc_transaction = Transaction {
+                    inner: alloy_rpc_types_eth::Transaction {
+                        inner: transaction,
+                        block_hash: None,
+                        block_number: Some(self.pending_block.number),
+                        transaction_index: Some(idx as u64),
+                        effective_gas_price: Some(effective_gas_price),
+                    },
+                    deposit_nonce,
+                    deposit_receipt_version,
+                };
+                self.evm.db_mut().commit(state.clone());
+
+                Ok(ExecutedPendingTransaction {
+                    rpc_transaction,
+                    receipt: op_receipt,
+                    state,
+                    result,
+                })
+            }
+            Err(e) => Err(ExecutionError::TransactionFailed {
+                tx_hash,
+                sender: transaction.signer(),
+                reason: format!("{e:?}"),
+            }
+            .into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use alloy_consensus::{Block, Header, Signed};
+    use alloy_primitives::{Address, B256, TxKind, U256, address};
+    use base_alloy_consensus::OpTxEnvelope;
+    use base_execution_chainspec::OpChainSpecBuilder;
+    use base_execution_evm::OpEvmConfig;
+    use base_revm::L1BlockInfo;
+    use reth_evm::ConfigureEvm;
+    use revm::{database::InMemoryDB, state::AccountInfo};
+
+    use super::*;
+
+    const L1_BLOCK_ADDRESS: Address =
+        Address::new([0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15]);
+
+    const DA_FOOTPRINT_GAS_SCALAR_SLOT: U256 = U256::from_limbs([8u64, 0, 0, 0]);
+
+    fn create_legacy_tx() -> alloy_consensus::transaction::Recovered<OpTxEnvelope> {
+        let tx = alloy_consensus::TxLegacy {
+            chain_id: Some(8453),
+            nonce: 0,
+            gas_price: 1_000_000_000,
+            gas_limit: 21_000,
+            to: TxKind::Call(Address::ZERO),
+            value: U256::ZERO,
+            input: Default::default(),
+        };
+
+        let envelope = OpTxEnvelope::Legacy(Signed::new_unchecked(
+            tx,
+            alloy_primitives::Signature::test_signature(),
+            B256::ZERO,
+        ));
+
+        alloy_consensus::transaction::Recovered::new_unchecked(envelope, Address::ZERO)
+    }
+
+    #[test]
+    fn flashblock_tx_has_nonzero_blob_gas_used_when_jovian_active() {
+        let chain_spec = Arc::new(OpChainSpecBuilder::base_mainnet().jovian_activated().build());
+        let mut db = InMemoryDB::default();
+
+        let sender_info = AccountInfo {
+            balance: U256::from(1_000_000_000_000_000_000u128),
+            ..Default::default()
+        };
+        db.insert_account_info(Address::ZERO, sender_info);
+
+        // Seed L1 block contract slot 8 with DA footprint gas scalar at bytes [18..20] (big-endian u16).
+        let da_scalar: u16 = 100;
+        let mut slot_value = [0u8; 32];
+        slot_value[18..20].copy_from_slice(&da_scalar.to_be_bytes());
+        db.insert_account_info(L1_BLOCK_ADDRESS, revm::state::AccountInfo::default());
+        db.insert_account_storage(
+            L1_BLOCK_ADDRESS,
+            DA_FOOTPRINT_GAS_SCALAR_SLOT,
+            U256::from_be_bytes(slot_value),
+        )
+        .expect("failed to insert L1 block storage");
+
+        let header = Header {
+            timestamp: 100,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            ..Default::default()
+        };
+        let evm_config = OpEvmConfig::optimism(Arc::clone(&chain_spec));
+        let evm_env = evm_config.evm_env(&header).expect("failed to create evm env");
+        let evm = evm_config.evm_with_env(db, evm_env);
+
+        let pending_block = Block { header, body: Default::default() };
+
+        let mut builder = PendingStateBuilder::new(
+            (*chain_spec).clone(),
+            evm,
+            pending_block,
+            None,
+            L1BlockInfo::default(),
+            StateOverride::default(),
+        );
+
+        let tx = create_legacy_tx();
+        let result = builder.execute_transaction(0, tx).expect("transaction execution failed");
+
+        let blob_gas_used =
+            result.receipt.inner.blob_gas_used.expect("blob_gas_used should be set");
+        assert!(
+            blob_gas_used > 0,
+            "blob_gas_used should be > 0 when Jovian is active for non-deposit tx, got {blob_gas_used}"
+        );
+    }
+
+    #[test]
+    fn flashblock_deposit_tx_has_zero_blob_gas_used_when_jovian_active() {
+        let chain_spec = Arc::new(OpChainSpecBuilder::base_mainnet().jovian_activated().build());
+        let mut db = InMemoryDB::default();
+
+        let deposit_sender: Address = address!("0x1234567890123456789012345678901234567890");
+        let sender_info = AccountInfo {
+            balance: U256::from(1_000_000_000_000_000_000u128),
+            ..Default::default()
+        };
+        db.insert_account_info(deposit_sender, sender_info);
+
+        // Seed L1 block contract slot 8 with DA footprint gas scalar at bytes [18..20] (big-endian u16).
+        let da_scalar: u16 = 100;
+        let mut slot_value = [0u8; 32];
+        slot_value[18..20].copy_from_slice(&da_scalar.to_be_bytes());
+        db.insert_account_info(L1_BLOCK_ADDRESS, AccountInfo::default());
+        db.insert_account_storage(
+            L1_BLOCK_ADDRESS,
+            DA_FOOTPRINT_GAS_SCALAR_SLOT,
+            U256::from_be_bytes(slot_value),
+        )
+        .expect("failed to insert L1 block storage");
+
+        let header = Header {
+            timestamp: 100,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            ..Default::default()
+        };
+        let evm_config = OpEvmConfig::optimism(Arc::clone(&chain_spec));
+        let evm_env = evm_config.evm_env(&header).expect("failed to create evm env");
+        let evm = evm_config.evm_with_env(db, evm_env);
+
+        let pending_block = Block { header, body: Default::default() };
+
+        let mut builder = PendingStateBuilder::new(
+            (*chain_spec).clone(),
+            evm,
+            pending_block,
+            None,
+            L1BlockInfo::default(),
+            StateOverride::default(),
+        );
+
+        let deposit_tx = base_alloy_consensus::TxDeposit {
+            source_hash: B256::ZERO,
+            from: deposit_sender,
+            to: TxKind::Call(Address::ZERO),
+            mint: 0,
+            value: U256::ZERO,
+            gas_limit: 21_000,
+            is_system_transaction: false,
+            input: Default::default(),
+        };
+
+        let sealed = alloy_consensus::Sealed::new_unchecked(deposit_tx, B256::ZERO);
+        let envelope = OpTxEnvelope::Deposit(sealed);
+        let tx = alloy_consensus::transaction::Recovered::new_unchecked(envelope, deposit_sender);
+
+        let result = builder.execute_transaction(0, tx).expect("deposit execution failed");
+
+        let blob_gas_used =
+            result.receipt.inner.blob_gas_used.expect("blob_gas_used should be set");
+        assert_eq!(
+            blob_gas_used, 0,
+            "blob_gas_used should be 0 for deposit tx even when Jovian is active"
+        );
+    }
+}

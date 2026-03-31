@@ -1,11 +1,11 @@
 ![Base](docs/assets/logo.png)
 
-# Base Reth Node
+# Base
 
 > [!WARNING]
 > This repository is for development purposes. For production deployments, please use the releases referenced in [base/node](https://github.com/base/node/releases).
 
-Base Reth Node is a Reth-based Ethereum node implementation, specifically tailored for the Base L2 network. It integrates Flashblocks capabilities and leverages Optimism components from Reth (see the version pinned in [Cargo.toml](Cargo.toml)). This node is designed to provide a robust and efficient solution for interacting with the Base network.
+This repository (`base/base`, previously `base/node-reth`) contains **Base Reth Node**: a Reth-based Ethereum node implementation tailored for the Base L2 network. It integrates Flashblocks capabilities and leverages Optimism components from Reth (see the version pinned in [Cargo.toml](Cargo.toml)). This node is designed to provide a robust and efficient solution for interacting with the Base network.
 
 <!-- Badge row 1 - status -->
 
@@ -46,9 +46,10 @@ Base Reth Node is a Reth-based Ethereum node implementation, specifically tailor
 
 ## Prerequisites
 
-- **Rust:** Version 1.88 or later (matches the `rust-version` in `Cargo.toml`). You can install Rust using [rustup](https://rustup.rs/).
+- **Rust:** Version 1.93 or later (matches the `rust-version` in `Cargo.toml`). You can install Rust using [rustup](https://rustup.rs/).
 - **Just:** A command runner. Installation instructions can be found [here](https://github.com/casey/just#installation).
-- **Docker:** (Optional) For building and running the node in a container. See [Docker installation guide](https://docs.docker.com/get-docker/).
+- **Foundry:** Required for compiling Solidity test contracts (`just build-contracts`). Install via [foundry.sh](https://www.getfoundry.sh/).
+- **Docker:** (Optional) For building and running the node in a container. See [Docker installation guide](https://docs.docker.com/get-started/get-docker/).
 - **Build Essentials:** `git`, `libclang-dev`, `pkg-config`, `curl`, `build-essential` (these are installed in the Docker build process and may be needed for local builds on some systems).
 
 ## Getting Started
@@ -67,6 +68,12 @@ You can build the project using the `justfile` for a release build:
 ```bash
 just build
 ```
+
+*For first-time setup (to ensure all dependencies are installed), you can optionally **setup** run as a precursor:*
+
+  ```bash
+  just setup
+  ```
 
 Alternatively, if performance is critical, you can build with all optimizations enabled + jemalloc:
 

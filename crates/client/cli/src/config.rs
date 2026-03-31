@@ -6,8 +6,8 @@
 use std::{fs::File, path::PathBuf};
 
 use alloy_chains::Chain;
-use kona_genesis::{L1ChainConfig, RollupConfig};
-use kona_registry::{L1Config, scr_rollup_config_by_alloy_ident};
+use base_consensus_genesis::{L1ChainConfig, RollupConfig};
+use base_consensus_registry::{L1Config, Registry};
 use serde_json::from_reader;
 use tracing::debug;
 
@@ -55,7 +55,7 @@ impl L1ConfigFile {
     pub fn load(&self, l1_chain_id: u64) -> Result<L1ChainConfig, ConfigError> {
         match &self.l1_config_file {
             Some(path) => {
-                debug!("Loading l1 config from file: {:?}", path);
+                debug!(path = ?path, "Loading l1 config from file");
                 let file = File::open(path).map_err(ConfigError::OpenFile)?;
                 from_reader(file).map_err(ConfigError::Parse)
             }
@@ -72,7 +72,7 @@ impl L1ConfigFile {
 /// L2 rollup configuration file path wrapper.
 ///
 /// Wraps an optional path to a custom L2 rollup configuration file.
-/// If no path is provided, the configuration is loaded from the superchain registry.
+/// If no path is provided, the configuration is loaded from the registry.
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct L2ConfigFile {
     /// Path to a custom L2 rollup configuration file.
@@ -99,13 +99,13 @@ impl L2ConfigFile {
     pub fn load(&self, l2_chain: &Chain) -> Result<RollupConfig, ConfigError> {
         match &self.l2_config_file {
             Some(path) => {
-                debug!("Loading l2 config from file: {:?}", path);
+                debug!(path = ?path, "Loading l2 config from file");
                 let file = File::open(path).map_err(ConfigError::OpenFile)?;
                 from_reader(file).map_err(ConfigError::Parse)
             }
             None => {
-                debug!("Loading l2 config from superchain registry");
-                let cfg = scr_rollup_config_by_alloy_ident(l2_chain)
+                debug!("Loading l2 config from registry");
+                let cfg = Registry::rollup_config_by_chain(l2_chain)
                     .ok_or_else(|| ConfigError::NotFound(l2_chain.id()))?;
                 Ok(cfg.clone())
             }

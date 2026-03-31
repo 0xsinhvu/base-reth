@@ -2,13 +2,16 @@
 
 use std::net::UdpSocket;
 
+use base_cli_utils::LogConfig;
 use based::{
     BlockProductionHealthChecker, HealthcheckConfig, HealthcheckMetrics, Node,
     alloy_client::AlloyEthClient,
 };
 use cadence::{StatsdClient, UdpMetricSink};
 use clap::Parser;
-use tracing::Level;
+use tracing::info;
+
+base_cli_utils::define_log_args!("BBHC_SIDECAR");
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Blockbuilding sidecar healthcheck service")]
@@ -29,13 +32,8 @@ struct Args {
     #[arg(long, env = "BBHC_SIDECAR_UNHEALTHY_NODE_THRESHOLD_MS", default_value_t = 3000u64)]
     unhealthy_node_threshold_ms: u64,
 
-    /// Log level
-    #[arg(long, env, default_value_t = Level::INFO)]
-    log_level: Level,
-
-    /// Log format (text|json)
-    #[arg(long, env, default_value = "json")]
-    log_format: String,
+    #[command(flatten)]
+    log: LogArgs,
 
     /// Treat node as a new instance on startup (suppresses initial errors until healthy)
     #[arg(long, env, default_value_t = true)]
@@ -46,18 +44,13 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    // Initialize logging
-    if args.log_format.to_lowercase() == "json" {
-        let _ = tracing_subscriber::fmt().json().with_max_level(args.log_level).try_init();
-    } else {
-        let _ = tracing_subscriber::fmt().with_max_level(args.log_level).try_init();
-    }
+    LogConfig::from(args.log).init_tracing_subscriber().expect("failed to initialize tracing");
 
     // Initialize StatsD client (sends to Datadog agent)
     // Use DD_AGENT_HOST if set (Kubernetes), otherwise localhost
     let statsd_host = std::env::var("DD_AGENT_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let statsd_addr = format!("{statsd_host}:8125");
-    tracing::info!(address = %statsd_addr, "Connecting to StatsD agent");
+    info!(address = %statsd_addr, "Connecting to StatsD agent");
 
     let socket = UdpSocket::bind("0.0.0.0:0").expect("failed to bind UDP socket");
     socket.set_nonblocking(true).expect("failed to set socket nonblocking");
@@ -81,7 +74,7 @@ async fn main() {
         .with_tag("servicename", &service_name)
         .build();
 
-    tracing::info!(
+    info!(
         configname = %config_name,
         environment = %environment,
         projectname = %project_name,
@@ -117,7 +110,7 @@ async fn main() {
     tokio::select! {
         _ = checker.poll_for_health_checks() => {},
         _ = &mut shutdown_rx => {
-            tracing::info!(message = "Shutdown signal received, exiting");
+            info!("Shutdown signal received, exiting");
         }
     }
 }

@@ -5,10 +5,10 @@ use alloy_primitives::{B64, B256, Bytes, TxKind, U256, address, hex};
 use alloy_provider::{Provider, RootProvider};
 use alloy_rpc_types_engine::{ForkchoiceUpdated, PayloadAttributes, PayloadStatusEnum};
 use alloy_rpc_types_eth::Block;
-use op_alloy_consensus::{OpTypedTransaction, TxDeposit};
-use op_alloy_network::Optimism;
-use op_alloy_rpc_types::Transaction;
-use reth_optimism_node::OpPayloadAttributes;
+use base_alloy_consensus::{OpTypedTransaction, TxDeposit};
+use base_alloy_network::Base;
+use base_alloy_rpc_types::Transaction;
+use base_node_core::OpPayloadAttributes;
 
 use super::{
     DEFAULT_DENOMINATOR, DEFAULT_ELASTICITY, DEFAULT_GAS_LIMIT, EngineApi, ExternalNode, Ipc,
@@ -22,7 +22,7 @@ use crate::BuilderConfig;
 #[derive(Debug)]
 pub struct ChainDriver<RpcProtocol: Protocol = Ipc> {
     engine_api: EngineApi<RpcProtocol>,
-    provider: RootProvider<Optimism>,
+    provider: RootProvider<Base>,
     signer: Option<PrivateKeySigner>,
     gas_limit: Option<u64>,
     builder_config: BuilderConfig,
@@ -47,7 +47,7 @@ impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
     }
 
     /// Creates a new `ChainDriver` for some EL node instance.
-    pub fn remote(provider: RootProvider<Optimism>, engine_api: EngineApi<RpcProtocol>) -> Self {
+    pub fn remote(provider: RootProvider<Base>, engine_api: EngineApi<RpcProtocol>) -> Self {
         Self {
             engine_api,
             provider,
@@ -72,7 +72,7 @@ impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
         self
     }
 
-    /// Adds an external Optimism execution client node that will receive all newly built
+    /// Adds an external Base execution client node that will receive all newly built
     /// blocks by this driver and ensure that they are valid. This validation process is
     /// transparent and happens in the background when building new blocks.
     ///
@@ -260,7 +260,7 @@ impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
             .await
     }
 
-    /// Retreives the latest built block and returns only a list of transaction
+    /// Retrieves the latest built block and returns only a list of transaction
     /// hashes from its body.
     pub async fn latest(&self) -> eyre::Result<Block<Transaction>> {
         self.provider
@@ -269,7 +269,7 @@ impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
             .ok_or_else(|| eyre::eyre!("Failed to get latest block"))
     }
 
-    /// Retreives the latest built block and returns a list of full transaction
+    /// Retrieves the latest built block and returns a list of full transaction
     /// contents in its body.
     pub async fn latest_full(&self) -> eyre::Result<Block<Transaction>> {
         self.provider
@@ -279,7 +279,7 @@ impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
             .ok_or_else(|| eyre::eyre!("Failed to get latest full block"))
     }
 
-    /// retreives a specific block by its number or tag and returns a list of transaction
+    /// retrieves a specific block by its number or tag and returns a list of transaction
     /// hashes from its body.
     pub async fn get_block(
         &self,
@@ -288,7 +288,7 @@ impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
         Ok(self.provider.get_block_by_number(number).await?)
     }
 
-    /// retreives a specific block by its number or tag and returns a list of full transaction
+    /// retrieves a specific block by its number or tag and returns a list of full transaction
     /// contents in its body.
     pub async fn get_block_full(
         &self,
@@ -304,7 +304,7 @@ impl<RpcProtocol: Protocol> ChainDriver<RpcProtocol> {
 
     /// Returns a reference to the underlying alloy provider that is used to
     /// interact with the chain.
-    pub const fn provider(&self) -> &RootProvider<Optimism> {
+    pub const fn provider(&self) -> &RootProvider<Base> {
         &self.provider
     }
 }

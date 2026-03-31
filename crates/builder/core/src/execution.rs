@@ -4,10 +4,13 @@
 
 use core::fmt::Debug;
 
+use ExecutionMeteringLimitExceeded::{
+    BlockStateRootTime, FlashblockExecutionTime, TransactionExecutionTime, TransactionStateRootTime,
+};
 use alloy_primitives::{Address, U256};
+use base_execution_primitives::{OpReceipt, OpTransactionSigned};
+use base_revm::OpTransactionError;
 use derive_more::Display;
-use op_revm::OpTransactionError;
-use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
 use thiserror::Error;
 
 use crate::flashblocks::FlashblocksExecutionInfo;
@@ -156,10 +159,6 @@ pub enum TxnExecutionError {
     #[error("nonce too low")]
     NonceTooLow,
 
-    /// Interop validation failed.
-    #[error("interop failed")]
-    InteropFailed,
-
     /// Internal EVM error during transaction execution.
     #[error("internal error: {0}")]
     InternalError(OpTransactionError),
@@ -256,8 +255,6 @@ impl ExecutionInfo {
         tx: &TxResources,
         limits: &ResourceLimits,
     ) -> Result<(), TxnExecutionError> {
-        use ExecutionMeteringLimitExceeded::*;
-
         // Check per-transaction DA size limit (always enforced, operator-configured)
         if let Some(da_limit) = limits.tx_data_limit
             && tx.da_size > da_limit

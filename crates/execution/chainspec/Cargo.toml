@@ -1,0 +1,79 @@
+[package]
+name = "base-execution-chainspec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "EVM chain spec implementation for optimism."
+
+[lints]
+workspace = true
+
+[dependencies]
+# reth
+reth-chainspec.workspace = true
+reth-ethereum-forks.workspace = true
+reth-primitives-traits.workspace = true
+reth-network-peers.workspace = true
+
+# op-reth
+base-execution-forks.workspace = true
+base-protocol.workspace = true
+
+# ethereum
+alloy-chains.workspace = true
+alloy-genesis.workspace = true
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-hardforks.workspace = true
+
+# op
+base-alloy-rpc-types.workspace = true
+
+serde = { workspace = true, optional = true }
+serde_json.workspace = true
+
+# misc
+derive_more.workspace = true
+base-alloy-consensus.workspace = true
+
+[dev-dependencies]
+reth-chainspec = { workspace = true, features = ["test-utils"] }
+base-alloy-hardforks.workspace = true
+
+[features]
+default = [ "std" ]
+std = [
+	"alloy-chains/std",
+	"alloy-consensus/std",
+	"alloy-eips/std",
+	"alloy-genesis/std",
+	"alloy-primitives/std",
+	"base-alloy-consensus/std",
+	"base-alloy-rpc-types/std",
+	"base-execution-forks/std",
+	"base-protocol/std",
+	"derive_more/std",
+	"reth-chainspec/std",
+	"reth-ethereum-forks/std",
+	"reth-network-peers/std",
+	"reth-primitives-traits/std",
+	"serde?/std",
+	"serde_json/std",
+]
+serde = [
+	"alloy-chains/serde",
+	"alloy-consensus/serde",
+	"alloy-eips/serde",
+	"alloy-hardforks/serde",
+	"alloy-primitives/serde",
+	"base-alloy-consensus/serde",
+	"base-alloy-rpc-types/serde",
+	"base-execution-forks/serde",
+	"base-protocol/serde",
+	"reth-ethereum-forks/serde",
+	"reth-primitives-traits/serde",
+]

@@ -5,11 +5,11 @@ use alloy_consensus::TxEip1559;
 use alloy_eips::{BlockNumberOrTag, eip1559::MIN_PROTOCOL_BASE_FEE, eip2718::Encodable2718};
 use alloy_primitives::{Address, Bytes, TxHash, TxKind, U256, hex};
 use alloy_provider::{PendingTransactionBuilder, Provider, RootProvider};
+use base_alloy_consensus::{OpTxEnvelope, OpTypedTransaction};
+use base_alloy_network::Base;
+use base_txpool::BasePooledTransaction;
 use dashmap::DashMap;
 use futures::StreamExt;
-use op_alloy_consensus::{OpTxEnvelope, OpTypedTransaction};
-use op_alloy_network::Optimism;
-use reth_optimism_txpool::OpPooledTransaction;
 use reth_primitives::Recovered;
 use reth_transaction_pool::{AllTransactionsEvents, FullTransactionEvent, TransactionEvent};
 use tokio::sync::watch;
@@ -19,7 +19,7 @@ use super::{PrivateKeySigner, funded_signer, sign_op_tx};
 
 #[derive(Clone, Debug)]
 pub struct TransactionBuilder {
-    provider: RootProvider<Optimism>,
+    provider: RootProvider<Base>,
     signer: Option<PrivateKeySigner>,
     nonce: Option<u64>,
     base_fee: Option<u128>,
@@ -27,7 +27,7 @@ pub struct TransactionBuilder {
 }
 
 impl TransactionBuilder {
-    pub fn new(provider: RootProvider<Optimism>) -> Self {
+    pub fn new(provider: RootProvider<Base>) -> Self {
         Self {
             provider,
             signer: None,
@@ -132,7 +132,7 @@ impl TransactionBuilder {
             .expect("Failed to sign transaction")
     }
 
-    pub async fn send(self) -> eyre::Result<PendingTransactionBuilder<Optimism>> {
+    pub async fn send(self) -> eyre::Result<PendingTransactionBuilder<Base>> {
         let provider = self.provider.clone();
         let transaction = self.build().await;
         let transaction_encoded = transaction.encoded_2718();
@@ -163,7 +163,7 @@ impl Drop for TransactionPoolObserver {
 }
 
 impl TransactionPoolObserver {
-    pub fn new(stream: AllTransactionsEvents<OpPooledTransaction>) -> Self {
+    pub fn new(stream: AllTransactionsEvents<BasePooledTransaction>) -> Self {
         let mut stream = stream;
         let observations = Arc::new(ObservationsMap::new());
         let observations_clone = Arc::clone(&observations);
@@ -183,27 +183,27 @@ impl TransactionPoolObserver {
                     tx_event = stream.next() => {
                         match tx_event {
                             Some(FullTransactionEvent::Pending(hash)) => {
-                                tracing::debug!("Transaction pending: {hash}");
+                                debug!(hash = %hash, "Transaction pending");
                                 observations.entry(hash).or_default().push_back(TransactionEvent::Pending);
                             },
                             Some(FullTransactionEvent::Queued(hash, _)) => {
-                                tracing::debug!("Transaction queued: {hash}");
+                                debug!(hash = %hash, "Transaction queued");
                                 observations.entry(hash).or_default().push_back(TransactionEvent::Queued);
                             },
                             Some(FullTransactionEvent::Mined { tx_hash, block_hash }) => {
-                                tracing::debug!("Transaction mined: {tx_hash} in block {block_hash}");
+                                debug!(tx_hash = %tx_hash, block_hash = %block_hash, "Transaction mined");
                                 observations.entry(tx_hash).or_default().push_back(TransactionEvent::Mined(block_hash));
                             },
                             Some(FullTransactionEvent::Replaced { transaction, replaced_by }) => {
-                                tracing::debug!("Transaction replaced: {transaction:?} by {replaced_by}");
+                                debug!(transaction = ?transaction, replaced_by = %replaced_by, "Transaction replaced");
                                 observations.entry(*transaction.hash()).or_default().push_back(TransactionEvent::Replaced(replaced_by));
                             },
                             Some(FullTransactionEvent::Discarded(hash)) => {
-                                tracing::debug!("Transaction discarded: {hash}");
+                                debug!(hash = %hash, "Transaction discarded");
                                 observations.entry(hash).or_default().push_back(TransactionEvent::Discarded);
                             },
                             Some(FullTransactionEvent::Invalid(hash)) => {
-                                tracing::debug!("Transaction invalid: {hash}");
+                                debug!(hash = %hash, "Transaction invalid");
                                 observations.entry(hash).or_default().push_back(TransactionEvent::Invalid);
                             },
                             Some(FullTransactionEvent::Propagated(_)) | None => {},
@@ -254,7 +254,7 @@ impl TransactionPoolObserver {
     }
 
     pub fn print_all(&self) {
-        tracing::debug!("TxPool {:#?}", self.observations);
+        debug!(observations = ?self.observations, "TxPool");
     }
 
     pub fn exists(&self, txhash: TxHash) -> bool {

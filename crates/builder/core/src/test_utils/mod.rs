@@ -10,15 +10,15 @@ use alloy_network::TxSignerSync;
 use alloy_primitives::B256;
 pub use alloy_signer_local::PrivateKeySigner;
 pub use apis::*;
+use base_alloy_consensus::OpTypedTransaction;
+use base_execution_chainspec::OpChainSpec;
+use base_execution_primitives::OpTransactionSigned;
 pub use contracts::*;
 pub use driver::*;
 pub use external::*;
 pub use instance::*;
 use k256::sha2::{Digest, Sha256};
-use op_alloy_consensus::OpTypedTransaction;
 use reth_node_builder::NodeConfig;
-use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_primitives::OpTransactionSigned;
 use reth_primitives::Recovered;
 pub use txs::*;
 pub use utils::*;
@@ -105,7 +105,7 @@ fn init_tests() {
     // Clear OTEL env vars that may interfere with CLI argument parsing
     clear_otel_env_vars();
 
-    use tracing_subscriber::{filter::filter_fn, prelude::*};
+    use tracing_subscriber::{filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt};
     if let Ok(v) = std::env::var("TEST_TRACE") {
         let level = match v.as_str() {
             "true" | "debug" | "on" => tracing::Level::DEBUG,

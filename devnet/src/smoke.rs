@@ -6,8 +6,8 @@ use alloy_network::Ethereum;
 use alloy_provider::RootProvider;
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_engine::JwtSecret;
+use base_alloy_network::Base;
 use eyre::{Result, WrapErr};
-use op_alloy_network::Optimism;
 use tempfile::TempDir;
 use url::Url;
 
@@ -94,18 +94,18 @@ impl Devnet {
         Ok(RootProvider::<Ethereum>::new(client))
     }
 
-    /// Returns an L2 builder provider with Optimism network.
-    pub fn l2_builder_provider(&self) -> Result<RootProvider<Optimism>> {
+    /// Returns an L2 builder provider with Base network.
+    pub fn l2_builder_provider(&self) -> Result<RootProvider<Base>> {
         let url = self.l2_rpc_url()?;
         let client = RpcClient::builder().http(url);
-        Ok(RootProvider::<Optimism>::new(client))
+        Ok(RootProvider::<Base>::new(client))
     }
 
-    /// Returns an L2 client provider with Optimism network.
-    pub fn l2_client_provider(&self) -> Result<RootProvider<Optimism>> {
+    /// Returns an L2 client provider with Base network.
+    pub fn l2_client_provider(&self) -> Result<RootProvider<Base>> {
         let url = self.l2_client_rpc_url()?;
         let client = RpcClient::builder().http(url);
-        Ok(RootProvider::<Optimism>::new(client))
+        Ok(RootProvider::<Base>::new(client))
     }
 
     /// Returns all RPC URLs for this devnet instance.
@@ -114,8 +114,8 @@ impl Devnet {
             l1_rpc: self.l1_rpc_url().await?.to_string(),
             l2_builder_rpc: self.l2_rpc_url()?.to_string(),
             l2_client_rpc: self.l2_client_rpc_url()?.to_string(),
-            l2_builder_op_rpc: self.l2_stack().builder_op_node_rpc_url().await?.to_string(),
-            l2_client_op_rpc: self.l2_stack().client_op_node_rpc_url().await?.to_string(),
+            l2_builder_op_rpc: self.l2_stack().builder_consensus_rpc_url().to_string(),
+            l2_client_op_rpc: self.l2_stack().client_consensus_rpc_url().to_string(),
         })
     }
 }
@@ -208,9 +208,6 @@ impl DevnetBuilder {
                 let l2_config = L2ContainerConfig {
                     use_stable_names: true,
                     network_name: Some(config.network_name.clone()),
-                    op_node_rpc_port: Some(config.ports.l2_builder_cl_rpc),
-                    op_node_p2p_port: Some(config.ports.l2_builder_cl_p2p),
-                    op_node_follower_rpc_port: Some(config.ports.l2_client_cl_rpc),
                     batcher_metrics_port: Some(config.ports.batcher_metrics),
                     builder_http_port: Some(config.ports.l2_builder_http),
                     builder_ws_port: Some(config.ports.l2_builder_ws),
@@ -221,6 +218,12 @@ impl DevnetBuilder {
                     client_ws_port: Some(config.ports.l2_client_ws),
                     client_auth_port: Some(config.ports.l2_client_auth),
                     client_p2p_port: Some(config.ports.l2_client_p2p),
+                    builder_consensus_rpc_port: Some(config.ports.l2_builder_cl_rpc),
+                    builder_consensus_p2p_tcp_port: Some(config.ports.l2_builder_cl_p2p),
+                    builder_consensus_p2p_udp_port: None,
+                    client_consensus_rpc_port: Some(config.ports.l2_client_cl_rpc),
+                    client_consensus_p2p_tcp_port: Some(config.ports.l2_client_cl_p2p),
+                    client_consensus_p2p_udp_port: None,
                 };
                 (Some(l1_config), Some(l2_config))
             });
@@ -258,8 +261,8 @@ impl DevnetBuilder {
             p2p_key: BUILDER.private_key,
             sequencer_key: SEQUENCER.private_key,
             batcher_key: BATCHER.private_key,
-            l1_rpc_url: l1_stack.reth().internal_rpc_url(),
-            l1_beacon_url: l1_stack.beacon().internal_beacon_url(),
+            l1_rpc_url: l1_stack.reth().rpc_url().await?.to_string(),
+            l1_beacon_url: l1_stack.beacon().beacon_url().await?,
             container_config: l2_container_config,
         };
 

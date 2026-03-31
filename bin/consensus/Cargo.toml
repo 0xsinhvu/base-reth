@@ -8,6 +8,10 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "base-consensus"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
@@ -16,29 +20,30 @@ workspace = true
 base-cli-utils.workspace = true
 base-client-cli.workspace = true
 
-# kona
-rollup-boost.workspace = true
-kona-genesis.workspace = true
-kona-derive = { workspace = true, features = ["metrics"] }
-kona-disc = { workspace = true, features = ["metrics"] }
-kona-gossip = { workspace = true, features = ["metrics"] }
-kona-engine = { workspace = true, features = ["metrics"] }
-kona-node-service = { workspace = true, features = ["metrics"] }
-kona-providers-alloy = { workspace = true, features = ["metrics"] }
-
 # alloy
-alloy-rpc-types-engine.workspace = true
+alloy-chains.workspace = true
+alloy-primitives.workspace = true
+
+# consensus
+base-consensus-genesis.workspace = true
+base-consensus-registry.workspace = true
+base-consensus-derive = { workspace = true, features = ["metrics"] }
+base-consensus-disc = { workspace = true, features = ["metrics"] }
+base-consensus-gossip = { workspace = true, features = ["metrics"] }
+base-consensus-engine = { workspace = true, features = ["metrics"] }
+base-consensus-node = { workspace = true, features = ["metrics"] }
+base-consensus-providers = { workspace = true, features = ["metrics"] }
 
 # cli
-url.workspace = true
 strum.workspace = true
 clap.workspace = true
 
 # tracing
-tracing.workspace = true
+tracing = { workspace = true, features = ["std"] }
 
 # metrics
 metrics.workspace = true
 
 # misc
 eyre.workspace = true
+serde.workspace = true

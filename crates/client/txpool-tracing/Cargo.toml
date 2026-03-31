@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 # workspace
 base-flashblocks.workspace = true
-base-client-node.workspace = true
+base-node-runner.workspace = true
 
 # reth
 reth-node-api.workspace = true
@@ -36,31 +36,29 @@ lru.workspace = true
 chrono.workspace = true
 metrics.workspace = true
 derive_more = { workspace = true, features = ["display"] }
-tracing.workspace = true
+tracing = { workspace = true, features = ["std"] }
 metrics-derive.workspace = true
 
 [dev-dependencies]
 # workspace
 base-flashblocks.workspace = true
-base-primitives.workspace = true
-base-client-node = { workspace = true, features = ["test-utils"] }
+base-node-runner = { workspace = true, features = ["test-utils"] }
 base-flashblocks-node = { workspace = true, features = ["test-utils"] }
 
 # reth
-reth-optimism-primitives.workspace = true
+base-execution-primitives.workspace = true
 reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 
 # revm
 revm-database.workspace = true
 
 # alloy
-alloy-eips.workspace = true
-alloy-consensus.workspace = true
-alloy-rpc-types-engine.workspace = true
+alloy-eips = { workspace = true, features = ["std"] }
+alloy-consensus = { workspace = true, features = ["std"] }
+alloy-rpc-types-engine = { workspace = true, features = ["std"] }
 
-# op-alloy
-op-alloy-consensus.workspace = true
-op-alloy-rpc-types.workspace = true
+# base-alloy
+base-alloy-consensus.workspace = true
 
 # misc
 eyre.workspace = true

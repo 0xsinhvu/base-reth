@@ -6,12 +6,12 @@ use alloy_consensus::{BlockHeader, Header, Sealed};
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{B256, U256};
 use base_bundles::{Bundle, MeterBundleResponse, ParsedBundle};
+use base_execution_chainspec::OpChainSpec;
+use base_execution_evm::extract_l1_info_from_tx;
+use base_execution_primitives::OpBlock;
 use base_flashblocks::{FlashblocksAPI, PendingBlocksAPI};
+use base_revm::L1BlockInfo;
 use jsonrpsee::core::{RpcResult, async_trait};
-use op_revm::L1BlockInfo;
-use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_evm::extract_l1_info_from_tx;
-use reth_optimism_primitives::OpBlock;
 use reth_primitives_traits::SealedHeader;
 use reth_provider::{
     BlockReader, BlockReaderIdExt, ChainSpecProvider, HeaderProvider, StateProviderFactory,
@@ -147,14 +147,12 @@ where
         let pending_state = if let Some(pb) = pending_blocks.as_ref() {
             let bundle_state = pb.get_bundle_state();
 
-            // Build a temporary PendingState without trie_input to get the cached trie
-            let temp_state = PendingState { bundle_state: bundle_state.clone(), trie_input: None };
-
             // Ensure the pending trie input is cached for reuse across bundle simulations
+            let payload_id = pb.payload_id();
             let fb_index = state_flashblock_index.unwrap();
             let trie_input = self
                 .pending_trie_cache
-                .ensure_cached(header.hash(), fb_index, &temp_state, &*state_provider)
+                .ensure_cached(payload_id, fb_index, &bundle_state, &*state_provider)
                 .map_err(|e| {
                     error!(error = %e, "Failed to cache pending trie input");
                     jsonrpsee::types::ErrorObjectOwned::owned(
@@ -199,7 +197,7 @@ where
             if error_msg.contains("nonce") {
                 debug!(error = %e, "Bundle metering failed");
             } else {
-                error!(error = %e, "Bundle metering failed");
+                info!(error = %e, "Bundle metering failed");
             }
             jsonrpsee::types::ErrorObjectOwned::owned(
                 jsonrpsee::types::ErrorCode::InternalError.code(),
@@ -390,14 +388,22 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use alloy_consensus::Header;
     use alloy_eips::Encodable2718;
-    use alloy_primitives::{Bytes, address};
+    use alloy_primitives::{B256, Bloom, Bytes, address};
     use alloy_rpc_client::RpcClient;
+    use base_alloy_consensus::OpTxEnvelope;
+    use base_alloy_flashblocks::{
+        ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
+    };
     use base_bundles::{Bundle, MeterBundleResponse};
-    use base_client_node::test_utils::{Account, TestHarness};
-    use op_alloy_consensus::OpTxEnvelope;
-    use reth_optimism_primitives::OpTransactionSigned;
+    use base_execution_primitives::OpTransactionSigned;
+    use base_flashblocks::{FlashblocksConfig, PendingBlocksBuilder};
+    use base_node_runner::test_utils::{Account, TestHarness};
     use reth_transaction_pool::test_utils::TransactionBuilder;
+    use url::Url;
 
     use super::*;
     use crate::{MeteringConfig, MeteringExtension};
@@ -762,14 +768,6 @@ mod tests {
     /// "Block not found: 0x0000000000000000000000000000000000000000000000000000000000000000"
     #[tokio::test]
     async fn test_meter_bundle_with_flashblocks_zero_hash_header() -> eyre::Result<()> {
-        use alloy_consensus::Header;
-        use alloy_primitives::{B256, Bloom};
-        use base_flashblocks::{FlashblocksConfig, PendingBlocksBuilder};
-        use base_primitives::{
-            ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
-        };
-        use url::Url;
-
         // Create a shared flashblocks state that we can inject pending blocks into
         let flashblocks_config =
             FlashblocksConfig::new(Url::parse("ws://localhost:12345").unwrap(), 10);

@@ -1,7 +1,8 @@
 //! Contains the CLI arguments
 
 use base_flashblocks::FlashblocksConfig;
-use reth_optimism_node::args::RollupArgs;
+use base_node_core::args::RollupArgs;
+use url::Url;
 
 /// CLI Arguments
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -11,6 +12,13 @@ pub struct Args {
     #[command(flatten)]
     pub rollup_args: RollupArgs,
 
+    /// A URL pointing to a secure websocket subscription that streams out flashblocks.
+    ///
+    /// If given, the flashblocks are received to build pending block. All request with "pending"
+    /// block tag will use the pending state based on flashblocks.
+    #[arg(long, alias = "websocket-url")]
+    pub flashblocks_url: Option<Url>,
+
     /// The max pending blocks depth.
     #[arg(
         long = "max-pending-blocks-depth",
@@ -18,6 +26,10 @@ pub struct Args {
         default_value = "3"
     )]
     pub max_pending_blocks_depth: u64,
+
+    /// Enable cached execution via the flashblocks-aware engine validator.
+    #[arg(long = "flashblocks.cached-execution", requires = "flashblocks_url")]
+    pub flashblocks_cached_execution: bool,
 
     /// Enable transaction tracing for mempool-to-block timing analysis
     #[arg(long = "enable-transaction-tracing", value_name = "ENABLE_TRANSACTION_TRACING")]
@@ -35,19 +47,12 @@ pub struct Args {
     pub enable_metering: bool,
 }
 
-impl Args {
-    /// Returns if flashblocks is enabled.
-    /// If the websocket url is specified through the CLI.
-    pub const fn flashblocks_enabled(&self) -> bool {
-        self.rollup_args.flashblocks_url.is_some()
-    }
-}
-
 impl From<&Args> for Option<FlashblocksConfig> {
     fn from(args: &Args) -> Self {
-        args.rollup_args
-            .flashblocks_url
-            .clone()
-            .map(|url| FlashblocksConfig::new(url, args.max_pending_blocks_depth))
+        args.flashblocks_url.clone().map(|url| {
+            let mut config = FlashblocksConfig::new(url, args.max_pending_blocks_depth);
+            config.cached_execution = args.flashblocks_cached_execution;
+            config
+        })
     }
 }

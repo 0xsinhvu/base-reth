@@ -14,18 +14,19 @@ use std::{
 use alloy_primitives::{B256, b256};
 use alloy_provider::Provider;
 use alloy_signer_local::PrivateKeySigner;
+use base_consensus_derive::ChainProvider;
+use base_consensus_disc::LocalNode;
+use base_consensus_genesis::RollupConfig;
+use base_consensus_gossip::GaterConfig;
+use base_consensus_node::NetworkConfig;
+use base_consensus_peers::{BootNode, BootStoreFile, PeerMonitoring, PeerScoreLevel};
+use base_consensus_providers::AlloyChainProvider;
 use clap::Parser;
 use discv5::enr::k256;
 use eyre::Result;
-use kona_derive::ChainProvider;
-use kona_disc::LocalNode;
-use kona_genesis::RollupConfig;
-use kona_gossip::GaterConfig;
-use kona_node_service::NetworkConfig;
-use kona_peers::{BootNode, BootStoreFile, PeerMonitoring, PeerScoreLevel};
-use kona_providers_alloy::AlloyChainProvider;
 use libp2p::identity::Keypair;
 use tokio::time::Duration;
+use tracing::{error, info, warn};
 use url::Url;
 
 use crate::signer::{SignerArgs, SignerArgsParseError};
@@ -275,11 +276,11 @@ impl P2PArgs {
         let tcp_socket = std::net::TcpListener::bind((ip_addr, tcp_port));
         let udp_socket = std::net::UdpSocket::bind((ip_addr, udp_port));
         if let Err(e) = tcp_socket {
-            tracing::error!(target: "p2p::flags", tcp_port, "Error binding TCP socket: {e}");
+            error!(target: "p2p::flags", tcp_port, error = %e, "Error binding TCP socket");
             eyre::bail!("Error binding TCP socket on port {tcp_port}: {e}");
         }
         if let Err(e) = udp_socket {
-            tracing::error!(target: "p2p::flags", udp_port, "Error binding UDP socket: {e}");
+            error!(target: "p2p::flags", udp_port, error = %e, "Error binding UDP socket");
             eyre::bail!("Error binding UDP socket on port {udp_port}: {e}");
         }
 
@@ -304,7 +305,7 @@ impl P2PArgs {
             match PrivateKeySigner::from_bytes(&key) {
                 Ok(signer) => return Some(signer),
                 Err(e) => {
-                    tracing::error!(target: "p2p::flags", "Failed to parse private key: {}", e);
+                    error!(target: "p2p::flags", error = %e, "Failed to parse private key");
                     return None;
                 }
             }
@@ -318,7 +319,7 @@ impl P2PArgs {
             match PrivateKeySigner::from_bytes(&decoded) {
                 Ok(signer) => return Some(signer),
                 Err(e) => {
-                    tracing::error!(target: "p2p::flags", "Failed to parse private key from file: {}", e);
+                    error!(target: "p2p::flags", error = %e, "Failed to parse private key from file");
                     return None;
                 }
             }
@@ -374,7 +375,7 @@ impl P2PArgs {
         })
     }
 
-    /// Constructs kona's P2P network [`NetworkConfig`] from CLI arguments.
+    /// Constructs the P2P network [`NetworkConfig`] from CLI arguments.
     ///
     /// ## Parameters
     ///
@@ -413,7 +414,7 @@ impl P2PArgs {
 
         let keypair = self.keypair().unwrap_or_else(|e| {
             let generated = Keypair::generate_secp256k1();
-            tracing::warn!(
+            warn!(
                 target: "p2p::config",
                 error = %e,
                 peer_id = %generated.public().to_peer_id(),
@@ -430,7 +431,7 @@ impl P2PArgs {
 
         let discovery_address =
             LocalNode::new(local_node_key, advertise_ip, advertise_tcp_port, advertise_udp_port);
-        let gossip_config = kona_gossip::default_config_builder()
+        let gossip_config = base_consensus_gossip::default_config_builder()
             .mesh_n(self.gossip_mesh_d)
             .mesh_n_low(self.gossip_mesh_dlo)
             .mesh_n_high(self.gossip_mesh_dhi)
@@ -467,8 +468,11 @@ impl P2PArgs {
         let bootnodes = self
             .bootnodes
             .iter()
-            .map(|bootnode| BootNode::parse_bootnode(bootnode))
-            .collect::<Vec<BootNode>>()
+            .map(|bootnode| {
+                BootNode::parse_bootnode(bootnode)
+                    .map_err(|e| eyre::eyre!("Failed to parse bootnode '{bootnode}': {e}"))
+            })
+            .collect::<Result<Vec<BootNode>>>()?
             .into();
 
         Ok(NetworkConfig {
@@ -505,9 +509,9 @@ impl P2PArgs {
     pub fn keypair(&self) -> Result<Keypair> {
         // Attempt the parse the private key if specified.
         if let Some(mut private_key) = self.private_key {
-            let keypair =
-                kona_cli::SecretKeyLoader::parse(&mut private_key.0).map_err(|e| eyre::eyre!(e))?;
-            tracing::info!(
+            let keypair = base_consensus_peers::SecretKeyLoader::parse(&mut private_key.0)
+                .map_err(|e| eyre::eyre!(e))?;
+            info!(
                 target: "p2p::config",
                 peer_id = %keypair.public().to_peer_id(),
                 "Successfully loaded P2P keypair from raw private key"
@@ -519,15 +523,16 @@ impl P2PArgs {
             eyre::bail!("Neither a raw private key nor a private key file path was provided.");
         };
 
-        kona_cli::SecretKeyLoader::load(key_path).map_err(|e| eyre::eyre!(e))
+        base_consensus_peers::SecretKeyLoader::load(key_path).map_err(|e| eyre::eyre!(e))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::b256;
+    use alloy_primitives::{Address, b256};
+    use base_consensus_genesis::RollupConfig;
+    use base_consensus_peers::NodeRecord;
     use clap::Parser;
-    use kona_peers::NodeRecord;
 
     use super::*;
 
@@ -662,7 +667,8 @@ mod tests {
             .bootnodes
             .iter()
             .map(|bootnode| BootNode::parse_bootnode(bootnode))
-            .collect::<Vec<BootNode>>();
+            .collect::<std::result::Result<Vec<BootNode>, _>>()
+            .expect("test bootnode should parse");
 
         // Otherwise, attempt to use the Node Record format.
         let record = NodeRecord::from_str(
@@ -701,6 +707,20 @@ mod tests {
                 "enr:-J64QBbwPjPLZ6IOOToOLsSjtFUjjzN66qmBZdUexpO32Klrc458Q24kbty2PdRaLacHM5z-cZQr8mjeQu3pik6jPSOGAYYFIqBfgmlkgnY0gmlwhDaRWFWHb3BzdGFja4SzlAUAiXNlY3AyNTZrMaECmeSnJh7zjKrDSPoNMGXoopeDF4hhpj5I0OsQUUt4u8uDdGNwgiQGg3VkcIIkBg",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_p2p_config_errors_on_invalid_bootnode() {
+        let args = MockCommand::parse_from(["test", "--p2p.bootnodes", "enr:invalid"]);
+
+        let err = args
+            .p2p
+            .config(&RollupConfig::default(), 8453, None, Some(Address::ZERO))
+            .await
+            .expect_err("invalid bootnode should fail config")
+            .to_string();
+
+        assert!(err.contains("Failed to parse bootnode 'enr:invalid'"));
     }
 
     #[test]

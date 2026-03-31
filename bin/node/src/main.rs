@@ -5,14 +5,14 @@
 
 pub mod cli;
 
-use base_client_node::BaseNodeRunner;
+use base_execution_cli::{Cli, chainspec::OpChainSpecParser};
 use base_flashblocks::FlashblocksConfig;
 use base_flashblocks_node::FlashblocksExtension;
 use base_metering::{MeteringConfig, MeteringExtension};
+use base_node_runner::BaseNodeRunner;
 use base_proofs_extension::ProofsHistoryExtension;
 use base_txpool_rpc::{TxPoolRpcConfig, TxPoolRpcExtension};
 use base_txpool_tracing::{TxPoolExtension, TxpoolConfig};
-use reth_optimism_cli::{Cli, chainspec::OpChainSpecParser};
 
 type NodeCli = Cli<OpChainSpecParser, cli::Args>;
 

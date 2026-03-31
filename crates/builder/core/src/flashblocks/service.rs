@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
 use base_builder_publish::WebSocketPublisher;
-use base_client_node::{BaseNode, OpNodeTypes, PayloadServiceBuilder as BasePayloadServiceBuilder};
+use base_execution_evm::OpEvmConfig;
+use base_node_core::{
+    OpConsensusBuilder, OpExecutorBuilder, OpNetworkBuilder, node::OpPoolBuilder,
+};
+use base_node_runner::{BaseNode, OpNodeTypes, PayloadServiceBuilder as BasePayloadServiceBuilder};
 use derive_more::Debug;
 use reth_basic_payload_builder::BasicPayloadJobGeneratorConfig;
 use reth_node_api::NodeTypes;
@@ -9,12 +13,9 @@ use reth_node_builder::{
     BuilderContext,
     components::{ComponentsBuilder, PayloadServiceBuilder},
 };
-use reth_optimism_evm::OpEvmConfig;
-use reth_optimism_node::{
-    OpConsensusBuilder, OpExecutorBuilder, OpNetworkBuilder, node::OpPoolBuilder,
-};
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
+use tracing::info;
 
 use super::{PayloadHandler, generator::BlockPayloadJobGenerator, payload::OpPayloadBuilder};
 use crate::{
@@ -74,11 +75,11 @@ impl FlashblocksServiceBuilder {
             PayloadHandler::new(built_payload_rx, payload_service.payload_events_handle());
 
         ctx.task_executor()
-            .spawn_critical("custom payload builder service", Box::pin(payload_service));
+            .spawn_critical_task("custom payload builder service", Box::pin(payload_service));
         ctx.task_executor()
-            .spawn_critical("flashblocks payload handler", Box::pin(payload_handler.run()));
+            .spawn_critical_task("flashblocks payload handler", Box::pin(payload_handler.run()));
 
-        tracing::info!("Flashblocks payload builder service started");
+        info!("Flashblocks payload builder service started");
         Ok(payload_builder_handle)
     }
 }

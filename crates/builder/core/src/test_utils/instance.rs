@@ -10,22 +10,22 @@ use std::sync::{Arc, LazyLock};
 
 use alloy_primitives::B256;
 use alloy_provider::{Identity, ProviderBuilder, RootProvider};
-use base_client_node::BaseNode;
-use base_primitives::FlashblocksPayloadV1;
+use base_alloy_flashblocks::FlashblocksPayloadV1;
+use base_alloy_network::Base;
+use base_execution_chainspec::OpChainSpec;
+use base_execution_rpc::OpEthApiBuilder;
+use base_node_core::{OpEngineValidatorBuilder, args::RollupArgs, node::OpPoolBuilder};
+use base_node_runner::BaseNode;
+use base_txpool::BasePooledTransaction;
 use futures::{FutureExt, StreamExt};
 use nanoid::nanoid;
-use op_alloy_network::Optimism;
 use parking_lot::Mutex;
 use reth_node_builder::{NodeBuilder, NodeConfig};
 use reth_node_core::{
     args::{DatadirArgs, NetworkArgs, RpcServerArgs},
     exit::NodeExitFuture,
 };
-use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_node::{OpEngineValidatorBuilder, args::RollupArgs, node::OpPoolBuilder};
-use reth_optimism_rpc::OpEthApiBuilder;
-use reth_optimism_txpool::OpPooledTransaction;
-use reth_tasks::TaskManager;
+use reth_tasks::{Runtime, RuntimeBuilder, RuntimeConfig};
 use reth_transaction_pool::{AllTransactionsEvents, TransactionPool};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -62,7 +62,7 @@ pub fn clear_otel_env_vars() {
 pub struct LocalInstance {
     node_config: NodeConfig<OpChainSpec>,
     builder_config: BuilderConfig,
-    task_manager: Option<TaskManager>,
+    runtime: Option<Runtime>,
     exit_future: NodeExitFuture,
     _node_handle: Box<dyn Any + Send>,
     pool_observer: TransactionPoolObserver,
@@ -89,18 +89,18 @@ impl LocalInstance {
         node_config: NodeConfig<OpChainSpec>,
     ) -> eyre::Result<Self> {
         clear_otel_env_vars();
-        let task_manager = task_manager();
+        let runtime = RuntimeBuilder::new(RuntimeConfig::default()).build()?;
         let base_node = BaseNode::new(RollupArgs::default());
 
         let (rpc_ready_tx, rpc_ready_rx) = oneshot::channel::<()>();
         let (txpool_ready_tx, txpool_ready_rx) =
-            oneshot::channel::<AllTransactionsEvents<OpPooledTransaction>>();
+            oneshot::channel::<AllTransactionsEvents<BasePooledTransaction>>();
 
         let da_config = builder_config.da_config.clone();
         let gas_limit_config = builder_config.gas_limit_config.clone();
         let metering_provider = Arc::clone(&builder_config.metering_provider);
 
-        let addons: base_client_node::BaseAddOns<_, OpEthApiBuilder, OpEngineValidatorBuilder> =
+        let addons: base_node_runner::BaseAddOns<_, OpEthApiBuilder, OpEngineValidatorBuilder> =
             base_node
                 .add_ons_builder()
                 .with_da_config(da_config.clone())
@@ -109,7 +109,7 @@ impl LocalInstance {
 
         let node_builder = NodeBuilder::<_, OpChainSpec>::new(node_config.clone())
             .with_database(create_test_db(node_config.clone()))
-            .with_launch_context(task_manager.executor())
+            .with_launch_context(runtime.clone())
             .with_types::<BaseNode>()
             .with_components(
                 base_node
@@ -144,7 +144,7 @@ impl LocalInstance {
             node_config,
             exit_future,
             _node_handle: node_handle,
-            task_manager: Some(task_manager),
+            runtime: Some(runtime),
             pool_observer: TransactionPoolObserver::new(pool_monitor),
             metering_provider,
         })
@@ -204,8 +204,8 @@ impl LocalInstance {
         ChainDriver::<Ipc>::local(self).await
     }
 
-    pub async fn provider(&self) -> eyre::Result<RootProvider<Optimism>> {
-        ProviderBuilder::<Identity, Identity, Optimism>::default()
+    pub async fn provider(&self) -> eyre::Result<RootProvider<Base>> {
+        ProviderBuilder::<Identity, Identity, Base>::default()
             .connect_ipc(self.rpc_ipc().to_string().into())
             .await
             .map_err(|e| eyre::eyre!("Failed to connect to provider: {e}"))
@@ -214,14 +214,14 @@ impl LocalInstance {
 
 impl Drop for LocalInstance {
     fn drop(&mut self) {
-        if let Some(task_manager) = self.task_manager.take() {
-            task_manager.graceful_shutdown_with_timeout(Duration::from_secs(3));
-            std::fs::remove_dir_all(self.node_config().datadir().to_string()).unwrap_or_else(|e| {
-                panic!(
-                    "Failed to remove temporary data directory {}: {e}",
+        if let Some(runtime) = self.runtime.take() {
+            runtime.graceful_shutdown_with_timeout(Duration::from_secs(10));
+            if let Err(e) = std::fs::remove_dir_all(self.node_config().datadir().to_string()) {
+                eprintln!(
+                    "Warning: failed to remove temporary data directory {}: {e}",
                     self.node_config().datadir()
-                )
-            });
+                );
+            }
         }
     }
 }
@@ -286,12 +286,8 @@ fn chain_spec() -> Arc<OpChainSpec> {
     CHAIN_SPEC.clone()
 }
 
-fn task_manager() -> TaskManager {
-    TaskManager::new(tokio::runtime::Handle::current())
-}
-
-fn pool_component() -> OpPoolBuilder<OpPooledTransaction> {
-    OpPoolBuilder::<OpPooledTransaction>::default().with_enable_tx_conditional(false)
+fn pool_component() -> OpPoolBuilder<BasePooledTransaction> {
+    OpPoolBuilder::<BasePooledTransaction>::default()
 }
 
 /// A utility for listening to flashblocks WebSocket messages during tests.

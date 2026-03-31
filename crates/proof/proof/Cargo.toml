@@ -1,0 +1,91 @@
+[package]
+name = "base-proof"
+description = "OP Stack Proof SDK"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace
+base-proof-mpt.workspace = true
+base-consensus-derive.workspace = true
+base-proof-driver.workspace = true
+base-proof-preimage.workspace = true
+base-proof-executor.workspace = true
+base-protocol.workspace = true
+base-consensus-registry.workspace = true
+base-consensus-genesis = { workspace = true, features = ["serde"] }
+
+# Alloy
+alloy-rlp.workspace = true
+alloy-eips.workspace = true
+alloy-trie.workspace = true
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+
+# Base Alloy
+base-alloy-consensus.workspace = true
+base-alloy-rpc-types-engine.workspace = true
+
+# Execution
+base-revm.workspace = true
+base-alloy-evm.workspace = true
+alloy-evm.workspace = true
+
+# General
+lru.workspace = true
+spin.workspace = true
+serde.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+
+# KZG
+ark-ff.workspace = true
+ark-bls12-381.workspace = true
+
+# `std` feature dependencies
+tokio = { workspace = true, features = ["full"], optional = true }
+
+[dev-dependencies]
+rand.workspace = true
+c-kzg.workspace = true
+rayon.workspace = true
+rstest.workspace = true
+tokio = { workspace = true, features = ["full"] }
+alloy-eips = { workspace = true, features = ["kzg"] }
+
+[features]
+std = [
+	"alloy-consensus/std",
+	"alloy-eips/std",
+	"alloy-evm/std",
+	"alloy-primitives/std",
+	"alloy-rlp/std",
+	"alloy-trie/std",
+	"ark-bls12-381/std",
+	"ark-ff/std",
+	"base-alloy-consensus/std",
+	"base-alloy-evm/std",
+	"base-alloy-rpc-types-engine/std",
+	"base-consensus-genesis/std",
+	"base-consensus-registry/std",
+	"base-proof-driver/std",
+	"base-proof-executor/std",
+	"base-proof-mpt/std",
+	"base-proof-preimage/std",
+	"base-protocol/std",
+	"base-revm/std",
+	"dep:tokio",
+	"serde/std",
+	"serde_json/std",
+	"spin/std",
+	"thiserror/std",
+	"tracing/std",
+]

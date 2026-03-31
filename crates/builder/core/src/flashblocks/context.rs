@@ -4,29 +4,28 @@ use std::{sync::Arc, time::Instant};
 use alloy_consensus::{Eip658Value, Transaction};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
-use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use base_access_lists::FBALBuilderDb;
-use op_alloy_consensus::OpDepositReceipt;
-use op_revm::OpSpecId;
+use base_alloy_consensus::{OpDepositReceipt, OpTxType};
+use base_alloy_evm::OpReceiptBuilder;
+use base_execution_chainspec::OpChainSpec;
+use base_execution_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
+use base_execution_forks::OpHardforks;
+use base_execution_payload_builder::{
+    config::{OpDAConfig, OpGasLimitConfig},
+    error::OpPayloadBuilderError,
+};
+use base_execution_primitives::{OpReceipt, OpTransactionSigned};
+use base_node_core::OpPayloadBuilderAttributes;
+use base_revm::{L1BlockInfo, OpSpecId};
+use base_txpool::estimated_da_size::DataAvailabilitySized;
 use reth_basic_payload_builder::PayloadConfig;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
     ConfigureEvm, Evm, EvmEnv, EvmError, InvalidTxError, eth::receipt_builder::ReceiptBuilderCtx,
-    op_revm::L1BlockInfo,
 };
 use reth_node_api::PayloadBuilderError;
-use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
-use reth_optimism_forks::OpHardforks;
-use reth_optimism_node::OpPayloadBuilderAttributes;
-use reth_optimism_payload_builder::{
-    config::{OpDAConfig, OpGasLimitConfig},
-    error::OpPayloadBuilderError,
-};
-use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
-use reth_optimism_txpool::estimated_da_size::DataAvailabilitySized;
 use reth_payload_builder::PayloadId;
 use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_primitives::SealedHeader;
@@ -332,7 +331,7 @@ impl OpPayloadBuilderCtx {
     /// Constructs a receipt for the given transaction.
     pub fn build_receipt<E: Evm>(
         &self,
-        ctx: ReceiptBuilderCtx<'_, OpTransactionSigned, E>,
+        ctx: ReceiptBuilderCtx<'_, OpTxType, E>,
         deposit_nonce: Option<u64>,
     ) -> OpReceipt {
         let receipt_builder = self.evm_config.block_executor_factory().receipt_builder();
@@ -425,14 +424,14 @@ impl OpPayloadBuilderCtx {
             info.cumulative_gas_used += gas_used;
 
             if !sequencer_tx.is_deposit() {
-                info.cumulative_da_bytes_used += op_alloy_flz::tx_estimated_size_fjord_bytes(
+                info.cumulative_da_bytes_used += base_alloy_flz::tx_estimated_size_fjord_bytes(
                     sequencer_tx.encoded_2718().as_slice(),
                 );
                 info.cumulative_uncompressed_bytes += sequencer_tx.encode_2718_len() as u64;
             }
 
             let ctx = ReceiptBuilderCtx {
-                tx: sequencer_tx.inner(),
+                tx_type: sequencer_tx.tx_type(),
                 evm: &evm,
                 result,
                 state: &state,
@@ -464,7 +463,7 @@ impl OpPayloadBuilderCtx {
         match fbal_db.finish() {
             Ok(fbal_builder) => info.extra.access_list_builder = fbal_builder,
             Err(err) => {
-                error!("Failed to finalize FBALBuilder: {}", err);
+                error!(error = %err, "Failed to finalize FBALBuilder");
             }
         }
 
@@ -705,7 +704,7 @@ impl OpPayloadBuilderCtx {
 
             // Push transaction changeset and calculate header bloom filter for receipt.
             let ctx = ReceiptBuilderCtx {
-                tx: tx.inner(),
+                tx_type: tx.tx_type(),
                 evm: &evm,
                 result,
                 state: &state,
@@ -734,7 +733,7 @@ impl OpPayloadBuilderCtx {
                 info.extra.access_list_builder = fbal_builder;
             }
             Err(err) => {
-                error!("Failed to finalize FBALBuilder: {}", err);
+                error!(error = %err, "Failed to finalize FBALBuilder");
             }
         }
 

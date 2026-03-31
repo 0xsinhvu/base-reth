@@ -18,14 +18,14 @@ workspace = true
 [dependencies]
 # workspace
 base-cli-utils.workspace = true
-base-client-node.workspace = true
+base-node-runner.workspace = true
 base-builder-core.workspace = true
 base-builder-metering.workspace = true
 base-txpool-rpc.workspace = true
 
 # reth
-reth-optimism-cli = { workspace = true, features = ["otlp"] }
-reth-optimism-node.workspace = true
+base-execution-cli = { workspace = true, features = ["otlp"] }
+base-node-core.workspace = true
 reth-cli-util.workspace = true
 
 # cli
@@ -37,10 +37,12 @@ eyre.workspace = true
 [dev-dependencies]
 # workspace
 base-builder-core = { workspace = true, features = ["test-utils"] }
+base-bundles.workspace = true
 
 # misc
+alloy-primitives.workspace = true
 rstest.workspace = true
 
 [features]
 default = [ "jemalloc" ]
-jemalloc = [ "base-builder-core/jemalloc", "reth-optimism-cli/jemalloc" ]
+jemalloc = [ "base-builder-core/jemalloc", "base-execution-cli/jemalloc" ]

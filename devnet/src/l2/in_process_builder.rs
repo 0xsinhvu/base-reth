@@ -12,7 +12,10 @@ use alloy_rpc_types_engine::JwtSecret;
 use base_builder_core::{
     BuilderConfig, FlashblocksConfig, FlashblocksServiceBuilder, test_utils::get_available_port,
 };
-use base_client_node::BaseNode;
+use base_execution_chainspec::OpChainSpec;
+use base_node_core::{args::RollupArgs, node::OpPoolBuilder};
+use base_node_runner::BaseNode;
+use base_txpool::BasePooledTransaction;
 use eyre::{Result, WrapErr, eyre};
 use nanoid::nanoid;
 use reth_db::{
@@ -26,10 +29,8 @@ use reth_node_core::{
     dirs::{DataDirPath, MaybePlatformPath},
     exit::NodeExitFuture,
 };
-use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_node::{args::RollupArgs, node::OpPoolBuilder};
-use reth_optimism_txpool::OpPooledTransaction;
-use reth_tasks::TaskManager;
+use reth_tasks::{Runtime, RuntimeBuilder, RuntimeConfig};
+use tracing::warn;
 use url::Url;
 
 use crate::{config::BUILDER, setup::BUILDER_ENODE_ID};
@@ -66,13 +67,13 @@ pub struct InProcessBuilder {
     data_dir: PathBuf,
     _node_exit_future: NodeExitFuture,
     _node: Box<dyn Any + Sync + Send>,
-    _task_manager: TaskManager,
+    _runtime: Runtime,
 }
 
 impl Drop for InProcessBuilder {
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_dir_all(&self.data_dir) {
-            tracing::warn!("Failed to remove temp data directory {:?}: {e}", self.data_dir);
+            warn!(dir = ?self.data_dir, error = %e, "Failed to remove temp data directory");
         }
     }
 }
@@ -103,8 +104,7 @@ impl InProcessBuilder {
         std::fs::write(&jwt_path, config.jwt_secret.as_bytes().encode_hex().as_bytes())
             .wrap_err("Failed to write JWT secret")?;
 
-        let tasks = TaskManager::current();
-        let exec = tasks.executor();
+        let runtime = RuntimeBuilder::new(RuntimeConfig::default()).build()?;
 
         let chain_spec = parse_genesis(&config.genesis_json)?;
 
@@ -130,10 +130,10 @@ impl InProcessBuilder {
 
         let base_node = BaseNode::new(rollup_args.clone());
 
-        let addons: base_client_node::BaseAddOns<
+        let addons: base_node_runner::BaseAddOns<
             _,
-            reth_optimism_rpc::OpEthApiBuilder,
-            reth_optimism_node::OpEngineValidatorBuilder,
+            base_execution_rpc::OpEthApiBuilder,
+            base_node_core::OpEngineValidatorBuilder,
         > = base_node
             .add_ons_builder()
             .with_sequencer(rollup_args.sequencer.clone())
@@ -148,7 +148,7 @@ impl InProcessBuilder {
 
         let node_builder = NodeBuilder::new(node_config.clone())
             .with_database(db)
-            .with_launch_context(exec.clone())
+            .with_launch_context(runtime.clone())
             .with_types::<BaseNode>()
             .with_components(
                 base_node
@@ -186,7 +186,7 @@ impl InProcessBuilder {
             data_dir: data_path,
             _node_exit_future: node_exit_future,
             _node: Box::new(node_handle),
-            _task_manager: tasks,
+            _runtime: runtime,
         })
     }
 
@@ -357,8 +357,6 @@ fn create_test_db(
     Ok((Arc::new(TempDatabase::new(db, db_path.clone())), db_path))
 }
 
-fn pool_component(rollup_args: &RollupArgs) -> OpPoolBuilder<OpPooledTransaction> {
-    OpPoolBuilder::<OpPooledTransaction>::default()
-        .with_enable_tx_conditional(false)
-        .with_supervisor(rollup_args.supervisor_http.clone(), rollup_args.supervisor_safety_level)
+fn pool_component(_rollup_args: &RollupArgs) -> OpPoolBuilder<BasePooledTransaction> {
+    OpPoolBuilder::<BasePooledTransaction>::default()
 }

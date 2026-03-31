@@ -2,27 +2,27 @@
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use alloy_consensus::{BlockHeader, Transaction as _, transaction::SignerRecoverable};
+use alloy_consensus::{BlockHeader, Transaction as _};
 use alloy_primitives::{Address, B256, U256};
 use base_bundles::{BundleExtensions, BundleTxs, ParsedBundle, TransactionResult};
+use base_execution_chainspec::OpChainSpec;
+use base_execution_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
+use base_revm::L1BlockInfo;
 use eyre::{Result as EyreResult, eyre};
-use op_revm::l1block::L1BlockInfo;
 use reth_evm::{ConfigureEvm, execute::BlockBuilder};
-use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
 use reth_primitives_traits::{Account, SealedHeader};
-use reth_revm::{database::StateProviderDatabase, db::State};
-use reth_trie_common::TrieInput;
-use revm_database::states::{BundleState, bundle_state::BundleRetention};
+use reth_revm::{database::StateProviderDatabase, db::State, primitives::KECCAK_EMPTY};
+use reth_trie_common::{HashedPostState, TrieInput};
+use revm_database::states::{BundleState, CacheState, bundle_state::BundleRetention};
 
 use crate::{metrics::Metrics, transaction::validate_tx};
 
-/// Computes the pending trie input from the bundle state.
+/// Computes the pending trie input from a pre-built [`HashedPostState`].
 ///
 /// This function records metrics for cache misses and compute duration.
 pub(crate) fn compute_pending_trie_input<SP>(
     state_provider: &SP,
-    bundle_state: &BundleState,
+    hashed_state: HashedPostState,
     metrics: &Metrics,
 ) -> EyreResult<PendingTrieInput>
 where
@@ -31,13 +31,31 @@ where
     metrics.pending_trie_cache_misses.increment(1);
     let start = Instant::now();
 
-    let hashed = state_provider.hashed_post_state(bundle_state);
-    let (_state_root, trie_updates) = state_provider.state_root_with_updates(hashed.clone())?;
+    let (_state_root, trie_updates) =
+        state_provider.state_root_with_updates(hashed_state.clone())?;
 
     let elapsed = start.elapsed();
     metrics.pending_trie_compute_duration.record(elapsed.as_secs_f64());
 
-    Ok(PendingTrieInput { trie_updates, hashed_state: hashed })
+    Ok(PendingTrieInput { trie_updates, hashed_state })
+}
+
+/// Converts a pending [`BundleState`] into a [`CacheState`] for use with
+/// `with_cached_prestate()`.
+fn cache_state_from_bundle_state(bundle_state: &BundleState) -> CacheState {
+    CacheState {
+        accounts: bundle_state
+            .state
+            .iter()
+            .map(|(&address, account)| (address, account.into()))
+            .collect(),
+        contracts: bundle_state
+            .contracts
+            .iter()
+            .map(|(&hash, code)| (hash, code.clone()))
+            .collect(),
+        ..Default::default()
+    }
 }
 
 /// Pre-computed trie input from pending state for efficient state root calculation.
@@ -67,6 +85,11 @@ pub struct PendingState {
 }
 
 const BLOCK_TIME: u64 = 2; // 2 seconds per block
+// Static floor from the current minimum base fee for metering simulation.
+// The protocol has a dynamic min_base_fee via system config, but for metering
+// we use a static floor to reject transactions that will never make it onchain.
+const MIN_BASEFEE: u64 = 5_000_000;
+const MAX_NONCE_AHEAD: u64 = 10_000; // max nonce distance from on-chain state
 
 /// Output from metering a bundle of transactions
 #[derive(Debug)]
@@ -117,7 +140,8 @@ where
                 metrics.pending_trie_cache_hits.increment(1);
                 Ok(cached.clone())
             } else {
-                compute_pending_trie_input(&state_provider, &ps.bundle_state, &metrics)
+                let hashed = state_provider.hashed_post_state(&ps.bundle_state);
+                compute_pending_trie_input(&state_provider, hashed, &metrics)
             }
         })
         .transpose()?;
@@ -125,16 +149,65 @@ where
     // Create state database
     let state_db = StateProviderDatabase::new(state_provider);
 
-    // Track bundle state changes. If metering with pending state, include it as bundle prestate.
+    // Track bundle state changes. When metering on top of pending flashblocks, seed execution
+    // from a cache prestate instead of `with_bundle_prestate()`. The two approaches produce
+    // identical execution results, but differ in what `take_bundle()` returns:
+    //
+    // - `with_bundle_prestate()`: `take_bundle()` includes the pending prestate in its output,
+    //   so `hashed_post_state()` generates prefix sets for every pending path. The trie walker
+    //   then rebuilds all of them — even though `prepend_cached` already provides those nodes —
+    //   making state root time proportional to pending state size.
+    //
+    // - `with_cached_prestate()`: `take_bundle()` returns only the bundle's delta, so prefix
+    //   sets cover only bundle-changed paths. The trie walker skips pending paths (reusing
+    //   cached nodes) and state root time is proportional to bundle size alone.
     let mut db = if let Some(ref ps) = pending_state {
         State::builder()
             .with_database(state_db)
             .with_bundle_update()
-            .with_bundle_prestate(ps.bundle_state.clone())
+            .with_cached_prestate(cache_state_from_bundle_state(&ps.bundle_state))
             .build()
     } else {
         State::builder().with_database(state_db).with_bundle_update().build()
     };
+
+    // Override sender nonces to match their first transaction's nonce and collect
+    // account info for pre-flight validation. `load_cache_account` reads from the
+    // cached pending prestate when available, so balances reflect pending state.
+    let mut first_nonces: HashMap<Address, u64> = HashMap::new();
+    for tx in bundle.transactions() {
+        first_nonces.entry(tx.signer()).or_insert_with(|| tx.nonce());
+    }
+
+    let mut account_infos: HashMap<Address, Option<Account>> = HashMap::new();
+    for (&addr, &nonce) in &first_nonces {
+        let cache_account = db.load_cache_account(addr)?;
+        if let Some(ref mut account) = cache_account.account {
+            let max_nonce = account.info.nonce.saturating_add(MAX_NONCE_AHEAD);
+            if nonce > max_nonce {
+                return Err(eyre!(
+                    "transaction nonce {} for {} exceeds max allowed (on-chain {} + {})",
+                    nonce,
+                    addr,
+                    account.info.nonce,
+                    MAX_NONCE_AHEAD,
+                ));
+            }
+            account.info.nonce = nonce;
+
+            account_infos.insert(
+                addr,
+                Some(Account {
+                    nonce: account.info.nonce,
+                    balance: account.info.balance,
+                    bytecode_hash: (account.info.code_hash != KECCAK_EMPTY)
+                        .then_some(account.info.code_hash),
+                }),
+            );
+        } else {
+            account_infos.insert(addr, None);
+        }
+    }
 
     // Set up next block attributes
     // Use bundle.min_timestamp if provided, otherwise use header timestamp + BLOCK_TIME
@@ -151,15 +224,6 @@ where
         extra_data: header.extra_data().clone(),
     };
 
-    // Pre-fetch account information for all transactions before creating builder. The
-    // account information is used to validate the transaction.
-    let mut accounts: HashMap<Address, Option<Account>> = HashMap::new();
-    for tx in bundle.transactions() {
-        let from = tx.recover_signer()?;
-        let account = db.database.basic_account(&from)?;
-        accounts.insert(from, account);
-    }
-
     // Execute transactions
     let mut results = Vec::new();
     let mut total_gas_used = 0u64;
@@ -170,21 +234,30 @@ where
         let evm_config = OpEvmConfig::optimism(chain_spec);
         let mut builder = evm_config.builder_for_next_block(&mut db, header, attributes)?;
 
+        // Cap the base fee at MIN_BASEFEE so transactions aren't rejected for
+        // max_fee_per_gas < basefee. We're simulating for gas measurement, not fee
+        // accounting. Balance checks in validate_tx still catch underfunded senders
+        // intentionally.
+        let block = &mut builder.evm_mut().block;
+        block.basefee = block.basefee.min(MIN_BASEFEE);
+
         builder.apply_pre_execution_changes()?;
 
         for tx in bundle.transactions() {
             let tx_start = Instant::now();
             let tx_hash = tx.tx_hash();
-            let from = tx.recover_signer()?;
+            let from = tx.signer();
             let to = tx.to();
             let value = tx.value();
             let gas_price = tx.max_fee_per_gas();
-            let account = accounts
+            let account = account_infos
                 .get(&from)
                 .ok_or_else(|| eyre!("Account not found in HashMap for address: {}", from))?
                 .ok_or_else(|| eyre!("Account is none for tx: {}", tx_hash))?;
 
-            // Don't waste resources metering invalid transactions
+            // Don't waste resources metering invalid transactions.
+            // Note: balance checks (InsufficientFunds*) are intentionally kept — an underfunded
+            // sender is a meaningful validation failure. Nonce and base fee are overridden above.
             validate_tx(account, tx, &mut l1_block_info)
                 .map_err(|e| eyre!("Transaction {} validation failed: {}", tx_hash, e))?;
 
@@ -213,18 +286,38 @@ where
         }
     }
 
-    // Calculate state root and measure its calculation time. The bundle already includes
-    // pending state if it was provided via with_bundle_prestate.
+    // Calculate state root and measure its calculation time. If pending flashblocks were present,
+    // `bundle_update` now contains only this bundle's delta; the cached pending trie is prepended
+    // below so state-root work stays incremental.
     db.merge_transitions(BundleRetention::Reverts);
     let bundle_update = db.take_bundle();
+
+    // Gets the number of storage slots modified from every account
+    let storage_slots_modified: usize =
+        bundle_update.state().values().map(|account| account.storage.len()).sum();
+    metrics.storage_slots_modified.record(storage_slots_modified as f64);
+
+    // Gets the number of accounts modified
+    let accounts_modified: usize = bundle_update.state().len();
+    metrics.accounts_modified.record(accounts_modified as f64);
+
     let state_provider = db.database.as_ref();
 
     let state_root_start = Instant::now();
     let hashed_state = state_provider.hashed_post_state(&bundle_update);
 
     if let Some(cached_trie) = pending_trie {
-        // Prepend cached pending trie so state root calculation only performs I/O
-        // for this bundle's changes, not for pending flashblocks.
+        // Build the trie input so the state root reflects canonical + pending + bundle.
+        //
+        // `from_state` generates prefix sets only for bundle-changed paths.
+        // `prepend_cached` merges the pending state's trie nodes and hashed values
+        // WITHOUT adding prefix sets — so the trie walker reuses cached nodes for
+        // pending-only paths and only rebuilds paths the bundle actually changed.
+        //
+        // Note: `prepend_cached` (not `prepend_self`) is essential here.
+        // `prepend_self` would merge prefix sets from the pending state, causing the
+        // walker to redundantly rebuild every pending path and defeating the
+        // optimization.
         let mut trie_input = TrieInput::from_state(hashed_state);
         trie_input.prepend_cached(cached_trie.trie_updates, cached_trie.hashed_state);
         let _ = state_provider.state_root_from_nodes_with_updates(trie_input)?;
@@ -251,13 +344,12 @@ mod tests {
     use alloy_eips::Encodable2718;
     use alloy_primitives::{Address, Bytes, keccak256, utils::Unit};
     use base_bundles::{Bundle, ParsedBundle};
-    use base_client_node::test_utils::{Account, TestHarness};
+    use base_execution_primitives::OpTransactionSigned;
+    use base_node_runner::test_utils::{Account, TestHarness};
     use eyre::Context;
-    use reth_optimism_primitives::OpTransactionSigned;
     use reth_provider::StateProviderFactory;
-    use reth_revm::{bytecode::Bytecode, primitives::KECCAK_EMPTY, state::AccountInfo};
+    use reth_revm::{bytecode::Bytecode, state::AccountInfo};
     use reth_transaction_pool::test_utils::TransactionBuilder;
-    use revm_context_interface::transaction::{AccessList, AccessListItem};
 
     use super::*;
 
@@ -586,27 +678,26 @@ mod tests {
         Ok(())
     }
 
-    /// Integration test: verifies `meter_bundle` uses flashblocks state correctly.
+    /// Verifies that a nonce ahead of on-chain state succeeds via override.
     ///
-    /// A transaction using nonce=1 should fail without flashblocks state (since
-    /// canonical nonce is 0), but succeed when flashblocks state indicates nonce=1.
+    /// Canonical nonce is 0, but the transaction uses nonce=1. The nonce override
+    /// sets the account nonce to match, so simulation succeeds.
     #[tokio::test]
-    async fn meter_bundle_requires_correct_layering_for_pending_nonce() -> eyre::Result<()> {
+    async fn meter_bundle_overrides_nonce_too_high() -> eyre::Result<()> {
         let harness = TestHarness::new().await?;
         let latest = harness.latest_block();
         let header = latest.sealed_header().clone();
 
-        // Create a transaction that requires nonce=1 (assuming canonical nonce is 0)
         let to = Address::random();
         let signed_tx = TransactionBuilder::default()
             .signer(Account::Alice.signer_b256())
             .chain_id(harness.chain_id())
-            .nonce(1) // Requires pending state to have nonce=1
+            .nonce(1) // Ahead of canonical nonce (0)
             .to(to)
             .value(100)
             .gas_limit(21_000)
-            .max_fee_per_gas(10)
-            .max_priority_fee_per_gas(1)
+            .max_fee_per_gas(MIN_BASEFEE as u128)
+            .max_priority_fee_per_gas(0)
             .into_eip1559();
 
         let tx = OpTransactionSigned::Eip1559(
@@ -614,62 +705,95 @@ mod tests {
         );
         let parsed_bundle = create_parsed_bundle(vec![tx])?;
 
-        // Without flashblocks state, transaction should fail (nonce mismatch)
         let state_provider = harness
             .blockchain_provider()
             .state_by_block_hash(latest.hash())
             .context("getting state provider")?;
 
-        let result_without_flashblocks = meter_bundle(
+        let result = meter_bundle(
             state_provider,
             harness.chain_spec(),
-            parsed_bundle.clone(),
+            parsed_bundle,
             &header,
             header.parent_beacon_block_root(),
-            None, // No pending state
+            None,
             L1BlockInfo::default(),
         );
 
         assert!(
-            result_without_flashblocks.is_err(),
-            "Transaction with nonce=1 should fail without pending state (canonical nonce is 0)"
+            result.is_ok(),
+            "Nonce ahead of on-chain state should succeed via override: {:?}",
+            result.err()
         );
 
-        // Now create pending state with nonce=1 for Alice
-        // Use BundleState::new() to properly calculate state_size
+        let output = result.unwrap();
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.total_gas_used, 21_000);
+
+        Ok(())
+    }
+
+    /// Verifies that a nonce behind on-chain state succeeds via override.
+    ///
+    /// Uses pending state to advance Alice's nonce to 5, then submits a transaction
+    /// with nonce=0. The nonce override sets the account nonce to match the
+    /// transaction, so simulation succeeds despite the nonce being "too low".
+    #[tokio::test]
+    async fn meter_bundle_overrides_nonce_too_low() -> eyre::Result<()> {
+        let harness = TestHarness::new().await?;
+        let latest = harness.latest_block();
+        let header = latest.sealed_header().clone();
+
+        // Build pending state where Alice's nonce has advanced to 5
         let bundle_state = BundleState::new(
             [(
                 Account::Alice.address(),
                 Some(AccountInfo {
-                    balance: U256::from(1_000_000_000u64),
+                    balance: U256::from(1_000_000_000_000_000_000u128),
                     nonce: 0, // original
                     code_hash: KECCAK_EMPTY,
                     code: None,
                     account_id: None,
                 }),
                 Some(AccountInfo {
-                    balance: U256::from(1_000_000_000u64),
-                    nonce: 1, // pending (after first flashblock tx)
+                    balance: U256::from(1_000_000_000_000_000_000u128),
+                    nonce: 5, // pending
                     code_hash: KECCAK_EMPTY,
                     code: None,
                     account_id: None,
                 }),
-                Default::default(), // no storage changes
+                Default::default(),
             )],
             Vec::<Vec<(Address, Option<Option<AccountInfo>>, Vec<(U256, U256)>)>>::new(),
             Vec::<(B256, Bytecode)>::new(),
         );
-
         let pending_state = PendingState { bundle_state, trie_input: None };
 
-        // With correct pending state, transaction should succeed
-        let state_provider2 = harness
+        // Transaction with nonce=0 — "too low" relative to pending nonce of 5
+        let to = Address::random();
+        let signed_tx = TransactionBuilder::default()
+            .signer(Account::Alice.signer_b256())
+            .chain_id(harness.chain_id())
+            .nonce(0)
+            .to(to)
+            .value(100)
+            .gas_limit(21_000)
+            .max_fee_per_gas(MIN_BASEFEE as u128)
+            .max_priority_fee_per_gas(0)
+            .into_eip1559();
+
+        let tx = OpTransactionSigned::Eip1559(
+            signed_tx.as_eip1559().expect("eip1559 transaction").clone(),
+        );
+        let parsed_bundle = create_parsed_bundle(vec![tx])?;
+
+        let state_provider = harness
             .blockchain_provider()
             .state_by_block_hash(latest.hash())
             .context("getting state provider")?;
 
-        let result_with_pending = meter_bundle(
-            state_provider2,
+        let result = meter_bundle(
+            state_provider,
             harness.chain_spec(),
             parsed_bundle,
             &header,
@@ -679,37 +803,86 @@ mod tests {
         );
 
         assert!(
-            result_with_pending.is_ok(),
-            "Transaction with nonce=1 should succeed with pending state showing nonce=1: {:?}",
-            result_with_pending.err()
+            result.is_ok(),
+            "Nonce behind on-chain state should succeed via override: {:?}",
+            result.err()
+        );
+
+        let output = result.unwrap();
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.total_gas_used, 21_000);
+
+        Ok(())
+    }
+
+    /// Verifies pending flashblock prestate is loaded into the execution cache, not the output
+    /// bundle. This keeps later trie prefix invalidation scoped to the simulated bundle delta.
+    #[test]
+    fn cached_prestate_does_not_leak_into_bundle_output() -> eyre::Result<()> {
+        let pending_bundle = BundleState::new(
+            [(
+                Account::Alice.address(),
+                Some(AccountInfo {
+                    balance: U256::from(1_000_000_000_000_000_000u128),
+                    nonce: 0,
+                    code_hash: KECCAK_EMPTY,
+                    code: None,
+                    account_id: None,
+                }),
+                Some(AccountInfo {
+                    balance: U256::from(1_000_000_000_000_000_000u128),
+                    nonce: 5,
+                    code_hash: KECCAK_EMPTY,
+                    code: None,
+                    account_id: None,
+                }),
+                Default::default(),
+            )],
+            Vec::<Vec<(Address, Option<Option<AccountInfo>>, Vec<(U256, U256)>)>>::new(),
+            Vec::<(B256, Bytecode)>::new(),
+        );
+
+        let mut db = State::builder()
+            .with_bundle_update()
+            .with_cached_prestate(cache_state_from_bundle_state(&pending_bundle))
+            .build();
+
+        let pending_account = db.load_cache_account(Account::Alice.address())?;
+        assert_eq!(
+            pending_account.account.as_ref().expect("pending account").info.nonce,
+            5,
+            "execution must read the pending prestate nonce from the cache"
+        );
+
+        db.merge_transitions(BundleRetention::Reverts);
+        let bundle_update = db.take_bundle();
+
+        assert!(
+            bundle_update.state().is_empty(),
+            "cached prestate must not be included in the simulated bundle output"
         );
 
         Ok(())
     }
 
+    /// Verifies that nonce overrides are rejected when too far ahead of on-chain state.
     #[tokio::test]
-    async fn meter_bundle_err_interop_tx() -> eyre::Result<()> {
+    async fn meter_bundle_err_nonce_too_far_ahead() -> eyre::Result<()> {
         let harness = TestHarness::new().await?;
         let latest = harness.latest_block();
         let header = latest.sealed_header().clone();
 
-        // Create a transaction with cross-L2 interop address in access list
         let to = Address::random();
-        let access_list = AccessList::from(vec![AccessListItem {
-            address: op_alloy_consensus::interop::CROSS_L2_INBOX_ADDRESS,
-            storage_keys: vec![],
-        }]);
-
+        let nonce = MAX_NONCE_AHEAD + 1; // Just over the limit (on-chain nonce is 0)
         let signed_tx = TransactionBuilder::default()
             .signer(Account::Alice.signer_b256())
             .chain_id(harness.chain_id())
-            .nonce(0)
+            .nonce(nonce)
             .to(to)
-            .value(1_000)
+            .value(100)
             .gas_limit(21_000)
-            .max_fee_per_gas(10)
-            .max_priority_fee_per_gas(1)
-            .access_list(access_list)
+            .max_fee_per_gas(MIN_BASEFEE as u128)
+            .max_priority_fee_per_gas(0)
             .into_eip1559();
 
         let tx = OpTransactionSigned::Eip1559(
@@ -733,11 +906,68 @@ mod tests {
             L1BlockInfo::default(),
         );
 
-        assert!(result.is_err());
+        assert!(result.is_err(), "Nonce exceeding MAX_NONCE_AHEAD should fail");
         assert!(
-            result.unwrap_err().to_string().contains("Interop transactions are not supported"),
-            "Expected interop error"
+            result.unwrap_err().to_string().contains("exceeds max allowed"),
+            "Expected max nonce error"
         );
+
+        Ok(())
+    }
+
+    /// Verifies that the base fee is capped at `MIN_BASEFEE` for simulation.
+    ///
+    /// The test genesis produces a next-block base fee of ~980M wei. A transaction with
+    /// `max_fee_per_gas` at the `MIN_BASEFEE` floor (5M wei) would normally be rejected,
+    /// but `meter_bundle` caps the base fee so simulation succeeds.
+    #[tokio::test]
+    async fn meter_bundle_caps_basefee_at_minimum() -> eyre::Result<()> {
+        let harness = TestHarness::new().await?;
+        let latest = harness.latest_block();
+        let header = latest.sealed_header().clone();
+
+        let to = Address::random();
+        let signed_tx = TransactionBuilder::default()
+            .signer(Account::Alice.signer_b256())
+            .chain_id(harness.chain_id())
+            .nonce(0)
+            .to(to)
+            .value(1_000)
+            .gas_limit(21_000)
+            .max_fee_per_gas(MIN_BASEFEE as u128) // At the floor, below the ~980M on-chain base fee
+            .max_priority_fee_per_gas(0)
+            .into_eip1559();
+
+        let tx = OpTransactionSigned::Eip1559(
+            signed_tx.as_eip1559().expect("eip1559 transaction").clone(),
+        );
+
+        let state_provider = harness
+            .blockchain_provider()
+            .state_by_block_hash(latest.hash())
+            .context("getting state provider")?;
+
+        let parsed_bundle = create_parsed_bundle(vec![tx])?;
+
+        let result = meter_bundle(
+            state_provider,
+            harness.chain_spec(),
+            parsed_bundle,
+            &header,
+            header.parent_beacon_block_root(),
+            None,
+            L1BlockInfo::default(),
+        );
+
+        assert!(
+            result.is_ok(),
+            "Transaction with max_fee_per_gas below base fee but at least MIN_BASEFEE should succeed: {:?}",
+            result.err()
+        );
+
+        let output = result.unwrap();
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.total_gas_used, 21_000);
 
         Ok(())
     }
@@ -791,6 +1021,100 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("Insufficient funds"),
             "Expected insufficient funds error"
+        );
+
+        Ok(())
+    }
+
+    /// Exercises the full optimized path: pending state with a cached trie input.
+    ///
+    /// Computes a real [`PendingTrieInput`] from pending state, then meters a bundle
+    /// on top of it. This covers the `prepend_cached` code path with the
+    /// `with_cached_prestate` change, verifying the two work correctly together.
+    #[tokio::test]
+    async fn meter_bundle_with_pending_state_and_cached_trie() -> eyre::Result<()> {
+        let harness = TestHarness::new().await?;
+        let latest = harness.latest_block();
+        let header = latest.sealed_header().clone();
+
+        // Build pending state: Alice sent a tx (nonce advanced to 1, balance decreased)
+        let pending_balance = U256::from(999_999_999_999_000_000_000_000u128);
+        let bundle_state = BundleState::new(
+            [(
+                Account::Alice.address(),
+                Some(AccountInfo {
+                    balance: U256::from(1_000_000u128) * U256::from(10u128).pow(U256::from(18)),
+                    nonce: 0,
+                    code_hash: KECCAK_EMPTY,
+                    code: None,
+                    account_id: None,
+                }),
+                Some(AccountInfo {
+                    balance: pending_balance,
+                    nonce: 1,
+                    code_hash: KECCAK_EMPTY,
+                    code: None,
+                    account_id: None,
+                }),
+                Default::default(),
+            )],
+            Vec::<Vec<(Address, Option<Option<AccountInfo>>, Vec<(U256, U256)>)>>::new(),
+            Vec::<(B256, Bytecode)>::new(),
+        );
+
+        // Compute the pending trie input
+        let state_provider = harness
+            .blockchain_provider()
+            .state_by_block_hash(latest.hash())
+            .context("getting state provider for trie")?;
+        let hashed = state_provider.hashed_post_state(&bundle_state);
+        let trie_input = compute_pending_trie_input(&state_provider, hashed, &Metrics::default())?;
+        drop(state_provider);
+
+        let pending_state = PendingState { bundle_state, trie_input: Some(trie_input) };
+
+        // Create a bundle tx: Alice (nonce=1 from pending) sends to a random address
+        let to = Address::random();
+        let signed_tx = TransactionBuilder::default()
+            .signer(Account::Alice.signer_b256())
+            .chain_id(harness.chain_id())
+            .nonce(1)
+            .to(to)
+            .value(1_000)
+            .gas_limit(21_000)
+            .max_fee_per_gas(MIN_BASEFEE as u128)
+            .max_priority_fee_per_gas(0)
+            .into_eip1559();
+
+        let tx = OpTransactionSigned::Eip1559(
+            signed_tx.as_eip1559().expect("eip1559 transaction").clone(),
+        );
+        let parsed_bundle = create_parsed_bundle(vec![tx])?;
+
+        let state_provider = harness
+            .blockchain_provider()
+            .state_by_block_hash(latest.hash())
+            .context("getting state provider")?;
+
+        let output = meter_bundle(
+            state_provider,
+            harness.chain_spec(),
+            parsed_bundle,
+            &header,
+            header.parent_beacon_block_root(),
+            Some(pending_state),
+            L1BlockInfo::default(),
+        )?;
+
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.total_gas_used, 21_000);
+        assert!(output.total_time_us > 0);
+        assert!(output.state_root_time_us > 0);
+        assert!(
+            output.total_time_us >= output.state_root_time_us,
+            "total_time_us ({}) should be >= state_root_time_us ({})",
+            output.total_time_us,
+            output.state_root_time_us
         );
 
         Ok(())

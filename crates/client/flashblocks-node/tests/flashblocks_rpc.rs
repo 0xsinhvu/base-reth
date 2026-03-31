@@ -11,15 +11,15 @@ use alloy_rpc_client::RpcClient;
 use alloy_rpc_types::simulate::{SimBlock, SimulatePayload};
 use alloy_rpc_types_engine::PayloadId;
 use alloy_rpc_types_eth::{TransactionInput, error::EthRpcErrorCode};
-use base_client_node::test_utils::{Account, DoubleCounter, L1_BLOCK_INFO_DEPOSIT_TX};
-use base_flashblocks_node::test_harness::FlashblocksHarness;
-use base_primitives::{
+use base_alloy_flashblocks::{
     ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, Flashblock, Metadata,
 };
+use base_alloy_network::{Base, ReceiptResponse, TransactionResponse};
+use base_alloy_rpc_types::OpTransactionRequest;
+use base_flashblocks_node::test_harness::FlashblocksHarness;
+use base_node_runner::test_utils::{Account, DoubleCounter, L1_BLOCK_INFO_DEPOSIT_TX};
 use eyre::Result;
-use futures_util::{SinkExt, StreamExt};
-use op_alloy_network::{Optimism, ReceiptResponse, TransactionResponse};
-use op_alloy_rpc_types::OpTransactionRequest;
+use futures::{SinkExt, StreamExt};
 use reth_revm::context::TransactionType;
 use reth_rpc_eth_api::RpcReceipt;
 use serde_json::json;
@@ -350,12 +350,12 @@ impl TestSetup {
         &self,
         tx: Bytes,
         timeout_ms: Option<u64>,
-    ) -> Result<RpcReceipt<Optimism>> {
+    ) -> Result<RpcReceipt<Base>> {
         let url = self.harness.rpc_url();
         let client = RpcClient::new_http(url.parse()?);
 
         let receipt = client
-            .request::<_, RpcReceipt<Optimism>>("eth_sendRawTransactionSync", (tx, timeout_ms))
+            .request::<_, RpcReceipt<Base>>("eth_sendRawTransactionSync", (tx, timeout_ms))
             .await?;
 
         Ok(receipt)

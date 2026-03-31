@@ -4,7 +4,7 @@ use alloy_primitives::B256;
 use anyhow::Result;
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
-use base_primitives::AcceptedBundle;
+use base_bundles::AcceptedBundle;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use tokio::time::Duration;
 use tracing::{error, info};
@@ -41,11 +41,11 @@ impl MessageQueue for KafkaMessageQueue {
             let record = FutureRecord::to(topic).key(key).payload(payload);
 
             match self.producer.send(record, Duration::from_secs(5)).await {
-                Ok((partition, offset)) => {
+                Ok(delivery) => {
                     info!(
                         key = %key,
-                        partition = partition,
-                        offset = offset,
+                        partition = delivery.partition,
+                        offset = delivery.offset,
                         topic = %topic,
                         "Successfully enqueued message"
                     );
@@ -71,7 +71,7 @@ impl MessageQueue for KafkaMessageQueue {
                     .with_max_times(3),
             )
             .notify(|err: &anyhow::Error, dur: Duration| {
-                info!("retrying to enqueue message {:?} after {:?}", err, dur);
+                info!(error = ?err, delay = ?dur, "retrying to enqueue message");
             })
             .await
     }
@@ -100,8 +100,8 @@ impl<Q: MessageQueue> BundleQueuePublisher<Q> {
 
 #[cfg(test)]
 mod tests {
-    use base_primitives::{
-        AcceptedBundle, Bundle, BundleExtensions, create_test_meter_bundle_response,
+    use base_bundles::{
+        AcceptedBundle, Bundle, BundleExtensions, test_utils::create_test_meter_bundle_response,
     };
     use rdkafka::config::ClientConfig;
     use tokio::time::{Duration, Instant};

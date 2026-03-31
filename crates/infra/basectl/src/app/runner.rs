@@ -1,11 +1,14 @@
+use std::io::Write;
+
 use anyhow::Result;
-use base_primitives::Flashblock;
+use base_alloy_flashblocks::Flashblock;
+use base_consensus_genesis::SystemConfig;
 use tokio::sync::mpsc;
 
 use super::{App, Resources, ViewId, views::create_view};
 use crate::{
     config::ChainConfig,
-    l1_client::{FullSystemConfig, fetch_full_system_config},
+    l1_client::fetch_full_system_config,
     rpc::{
         BacklogFetchResult, BlockDaInfo, L1BlockInfo, L1ConnectionMode, TimestampedFlashblock,
         fetch_initial_backlog_with_progress, run_block_fetcher, run_flashblock_ws,
@@ -86,7 +89,7 @@ fn start_background_services(config: &ChainConfig, resources: &mut Resources) {
 
     tokio::spawn(run_safe_head_poller(config.rpc.to_string(), sync_tx, toast_tx));
 
-    let (sys_config_tx, sys_config_rx) = mpsc::channel::<FullSystemConfig>(1);
+    let (sys_config_tx, sys_config_rx) = mpsc::channel::<SystemConfig>(1);
     resources.set_sys_config_channel(sys_config_rx);
 
     let l1_rpc = config.l1_rpc.to_string();
@@ -96,4 +99,29 @@ fn start_background_services(config: &ChainConfig, resources: &mut Resources) {
             let _ = sys_config_tx.send(cfg).await;
         }
     });
+}
+
+/// Streams flashblocks as JSON lines to stdout.
+pub async fn run_flashblocks_json(config: ChainConfig) -> Result<()> {
+    let (tx, mut rx) = mpsc::channel::<Flashblock>(100);
+    let (toast_tx, mut toast_rx) = mpsc::channel::<Toast>(50);
+
+    tokio::spawn(run_flashblock_ws(config.flashblocks_ws.to_string(), tx, toast_tx));
+
+    tokio::spawn(async move {
+        while let Some(toast) = toast_rx.recv().await {
+            eprintln!("connection status: {}", toast.message);
+        }
+    });
+
+    let stdout = std::io::stdout();
+    let mut writer = std::io::BufWriter::new(stdout.lock());
+
+    while let Some(fb) = rx.recv().await {
+        serde_json::to_writer(&mut writer, &fb)?;
+        writeln!(writer)?;
+        writer.flush()?;
+    }
+
+    Ok(())
 }

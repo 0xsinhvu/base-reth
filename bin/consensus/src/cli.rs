@@ -1,21 +1,23 @@
 //! Contains the CLI entry point for the Base consensus binary.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use alloy_rpc_types_engine::JwtSecret;
-use base_cli_utils::{CliStyles, GlobalArgs, LogConfig, RuntimeManager};
+use alloy_chains::Chain;
+use alloy_primitives::Address;
+use base_cli_utils::{CliStyles, LogConfig, RuntimeManager};
 use base_client_cli::{
     L1ClientArgs, L1ConfigFile, L2ClientArgs, L2ConfigFile, P2PArgs, RpcArgs, SequencerArgs,
 };
+use base_consensus_node::{EngineConfig, L1ConfigBuilder, NodeMode, RollupNodeBuilder};
+use base_consensus_registry::Registry;
 use clap::Parser;
-use kona_engine::RollupBoostServerArgs;
-use kona_node_service::{EngineConfig, L1ConfigBuilder, NodeMode, RollupNodeBuilder};
-use rollup_boost::ExecutionMode;
 use strum::IntoEnumIterator;
 use tracing::{error, info};
-use url::Url;
 
-use crate::metrics::init_rollup_config_metrics;
+use crate::metrics::{init_p2p_metrics, init_rollup_config_metrics};
+
+base_cli_utils::define_log_args!("BASE_NODE");
+base_cli_utils::define_metrics_args!("BASE_NODE", 9090);
 
 /// The Base Consensus CLI.
 #[derive(Parser, Clone, Debug)]
@@ -27,9 +29,21 @@ use crate::metrics::init_rollup_config_metrics;
     long_about = None
 )]
 pub struct Cli {
-    /// Global arguments for the Base Consensus CLI.
+    /// L2 Chain ID or name (8453 = Base Mainnet, 84532 = Base Sepolia).
+    #[arg(
+        long = "chain",
+        short = 'n',
+        global = true,
+        default_value = "8453",
+        env = "BASE_NODE_NETWORK"
+    )]
+    pub l2_chain_id: Chain,
+    /// Logging configuration.
     #[command(flatten)]
-    pub global: GlobalArgs,
+    pub logging: LogArgs,
+    /// Metrics configuration.
+    #[command(flatten)]
+    pub metrics: MetricsArgs,
     /// The mode to run the node in.
     #[arg(
         long = "mode",
@@ -75,26 +89,33 @@ impl Cli {
     /// Runs the CLI.
     pub fn run(self) -> eyre::Result<()> {
         // Initialize logging from global arguments.
-        LogConfig::from(self.global.logging.clone()).init_tracing_subscriber()?;
+        LogConfig::from(self.logging.clone()).init_tracing_subscriber()?;
 
         // Initialize unified metrics
-        self.global.metrics.init_with(|| {
-            kona_gossip::Metrics::init();
-            kona_disc::Metrics::init();
-            kona_engine::Metrics::init();
-            kona_node_service::Metrics::init();
-            kona_derive::Metrics::init();
-            kona_providers_alloy::Metrics::init();
+        base_cli_utils::MetricsConfig::from(self.metrics.clone()).init_with(|| {
+            base_consensus_gossip::Metrics::init();
+            base_consensus_disc::Metrics::init();
+            base_consensus_engine::Metrics::init();
+            base_consensus_node::Metrics::init();
+            base_consensus_derive::Metrics::init();
+            base_consensus_providers::Metrics::init();
             base_cli_utils::register_version_metrics!();
         })?;
 
         // Run the subcommand.
-        RuntimeManager::run_until_ctrl_c(self.exec(&self.global))
+        RuntimeManager::run_until_ctrl_c(self.exec())
+    }
+
+    /// Returns the signer [`Address`] from the rollup config for the given l2 chain id.
+    fn genesis_signer(&self) -> eyre::Result<Address> {
+        let id = self.l2_chain_id;
+        Registry::unsafe_block_signer(id.id())
+            .ok_or_else(|| eyre::eyre!("No unsafe block signer found for chain ID: {id}"))
     }
 
     /// Run the Node subcommand.
-    pub async fn exec(&self, args: &GlobalArgs) -> eyre::Result<()> {
-        let cfg = self.l2_config.load(&args.l2_chain_id).map_err(|e| eyre::eyre!("{e}"))?;
+    pub async fn exec(&self) -> eyre::Result<()> {
+        let cfg = self.l2_config.load(&self.l2_chain_id).map_err(|e| eyre::eyre!("{e}"))?;
 
         info!(
             target: "rollup_node",
@@ -102,7 +123,7 @@ impl Cli {
             "Starting rollup node services"
         );
         for hf in cfg.hardforks.to_string().lines() {
-            info!(target: "rollup_node", "{hf}");
+            info!(target: "rollup_node", hardfork = %hf, "hardfork");
         }
 
         let l1_chain_config =
@@ -116,44 +137,33 @@ impl Cli {
         };
 
         // If metrics are enabled, initialize the global cli metrics.
-        args.metrics.enabled.then(|| init_rollup_config_metrics(&cfg));
+        if self.metrics.enabled {
+            init_rollup_config_metrics(&cfg);
+            init_p2p_metrics(&self.p2p_flags);
+        }
 
         let jwt_secret = self.l2_client_args.validate_jwt().await?;
 
         self.p2p_flags.check_ports()?;
-        let genesis_signer = args.genesis_signer().ok();
+        let genesis_signer = self.genesis_signer().ok();
         let p2p_config = self
             .p2p_flags
             .clone()
             .config(
                 &cfg,
-                args.l2_chain_id.into(),
+                self.l2_chain_id.into(),
                 Some(self.l1_rpc_args.l1_eth_rpc.clone()),
                 genesis_signer,
             )
             .await?;
         let rpc_config = self.rpc_flags.clone().into();
 
-        // TODO: Remove hardcoded builder and rollup_boost config once we have our own
-        // RollupNodeBuilder implementation. These are required by kona's EngineConfig
-        // but are effectively disabled (execution_mode = Disabled, flashblocks = None).
         let engine_config = EngineConfig {
             config: Arc::new(cfg.clone()),
-            builder_url: Url::parse("http://localhost:8552").expect("valid url"),
-            builder_jwt_secret: JwtSecret::random(),
-            builder_timeout: Duration::from_millis(30),
             l2_url: self.l2_client_args.l2_engine_rpc.clone(),
             l2_jwt_secret: jwt_secret,
-            l2_timeout: Duration::from_millis(self.l2_client_args.l2_engine_timeout),
             l1_url: self.l1_rpc_args.l1_eth_rpc.clone(),
             mode: self.node_mode,
-            rollup_boost: RollupBoostServerArgs {
-                initial_execution_mode: ExecutionMode::Disabled,
-                block_selection_policy: None,
-                external_state_root: false,
-                ignore_unhealthy_builders: false,
-                flashblocks: None,
-            },
         };
 
         RollupNodeBuilder::new(
@@ -169,7 +179,7 @@ impl Cli {
         .start()
         .await
         .map_err(|e| {
-            error!(target: "rollup_node", "Failed to start rollup node service: {e}");
+            error!(target: "rollup_node", error = %e, "Failed to start rollup node service");
             eyre::eyre!("{e}")
         })?;
 

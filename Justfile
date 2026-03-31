@@ -1,6 +1,8 @@
 set positional-arguments := true
 set dotenv-filename := "etc/docker/devnet-env"
 
+mod tee 'crates/proof/tee'
+
 alias t := test
 alias f := fix
 alias b := build
@@ -15,8 +17,51 @@ alias wc := watch-check
 default:
     @just --list
 
+# One-time project setup: installs tooling and builds test contracts
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    OS="$(uname -s)"
+    ARCH="$(uname -m)"
+
+    # ── Install fast linker ──
+    if [[ "$OS" == "Darwin" ]]; then
+        if ! brew list lld &>/dev/null; then
+            echo "Installing lld linker for faster builds..."
+            brew install lld
+        fi
+        # Verify lld is reachable at the path .cargo/config.toml expects
+        if [[ "$ARCH" == "arm64" ]]; then
+            LLD="/opt/homebrew/opt/lld/bin/ld64.lld"
+        else
+            LLD="/usr/local/opt/lld/bin/ld64.lld"
+        fi
+        if [[ ! -x "$LLD" ]]; then
+            echo "ERROR: lld not found at $LLD"
+            echo "Try: brew install lld"
+            exit 1
+        fi
+        echo "Found lld at $LLD"
+    elif [[ "$OS" == "Linux" ]]; then
+        if ! command -v mold &>/dev/null; then
+            echo "mold not found. Install it for faster builds:"
+            echo "  Ubuntu/Debian: sudo apt-get install -y mold"
+            echo "  Fedora:        sudo dnf install mold"
+            echo "  Arch:          sudo pacman -S mold"
+            exit 1
+        fi
+        echo "Found mold at $(command -v mold)"
+    fi
+
+    just build-contracts
+    echo "Setup complete!"
+
 # Runs all ci checks
-ci: fix check lychee zepter
+ci: fix check lychee zepter check-no-std check-no-std-proof
+
+# Runs ci checks with tests scoped to crates affected by changes
+pr: fix check-format check-udeps check-clippy test-affected check-deny lychee zepter check-no-std check-no-std-proof
 
 # Performs lychee checks, installing the lychee command if necessary
 lychee:
@@ -32,7 +77,7 @@ check-deny:
     cargo deny check bans --hide-inclusion-graph
 
 # Fixes formatting and clippy issues
-fix: format-fix clippy-fix zepter-fix
+fix: build-contracts format-fix clippy-fix zepter-fix
 
 # Runs zepter feature checks, installing zepter if necessary
 zepter:
@@ -52,11 +97,50 @@ install-nextest:
 
 # Runs tests across workspace with all features enabled (excludes devnet)
 test: install-nextest build-contracts
-    RUSTFLAGS="-D warnings" cargo nextest run --workspace --all-features --exclude devnet
+    cargo nextest run --workspace --all-features --exclude devnet --no-fail-fast
+
+# Runs tests only for crates affected by changes vs main (excludes devnet)
+test-affected base="main": install-nextest build-contracts
+    #!/usr/bin/env bash
+    set -euo pipefail
+    affected=$(python3 etc/scripts/local/affected-crates.py {{ base }} --exclude devnet)
+    if [ -z "$affected" ]; then
+        echo "No affected crates to test."
+        exit 0
+    fi
+    pkg_args=""
+    while IFS= read -r crate; do
+        pkg_args="$pkg_args -p $crate"
+    done <<< "$affected"
+    echo "Testing affected crates:$pkg_args"
+    cargo nextest run --all-features $pkg_args
 
 # Runs tests with ci profile for minimal disk usage
 test-ci: install-nextest build-contracts
-    RUSTFLAGS="-D warnings" cargo nextest run --workspace --all-features --exclude devnet --cargo-profile ci
+    cargo nextest run --workspace --all-features --exclude devnet --cargo-profile ci
+
+# Runs tests only for affected crates with ci profile (for PRs)
+test-affected-ci base="main": install-nextest build-contracts
+    #!/usr/bin/env bash
+    set -euo pipefail
+    affected=$(python3 etc/scripts/local/affected-crates.py {{ base }} --exclude devnet)
+    if [ -z "$affected" ]; then
+        echo "No affected crates to test."
+        exit 0
+    fi
+    pkg_args=""
+    while IFS= read -r crate; do
+        pkg_args="$pkg_args -p $crate"
+    done <<< "$affected"
+    echo "Testing affected crates:$pkg_args"
+    cargo nextest run --all-features --cargo-profile ci $pkg_args || {
+        code=$?
+        if [ $code -eq 4 ]; then
+            echo "No tests to run."
+            exit 0
+        fi
+        exit $code
+    }
 
 # Runs devnet tests (requires Docker)
 devnet-tests: install-nextest build-contracts
@@ -66,13 +150,22 @@ devnet-tests: install-nextest build-contracts
 devnet-tests-ci: install-nextest build-contracts
     cargo nextest run -p devnet --cargo-profile ci
 
-# Pre-pulls Docker images needed for system tests
-system-tests-pull-images:
+# Pre-pulls Docker images needed for devnet tests
+devnet-pull-images:
     docker build -t devnet-setup:local -f etc/docker/Dockerfile.devnet .
     docker pull ghcr.io/paradigmxyz/reth:v1.10.2
     docker pull sigp/lighthouse:v8.0.1
-    docker pull us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.16.5
     docker pull us-docker.pkg.dev/oplabs-tools-artifacts/images/op-batcher:v1.16.3
+
+# Checks that no_std crates compile without std
+check-no-std:
+    ./etc/scripts/ci/check-no-std.sh
+
+# Checks that proof crates compile for a bare-metal FPVM target using nightly
+# -Zbuild-std=core,alloc. Requires: rustup toolchain install nightly &&
+# rustup component add rust-src --toolchain nightly
+check-no-std-proof:
+    ./etc/scripts/ci/check-no-std-proof.sh
 
 # Runs cargo hack against the workspace
 hack:
@@ -121,7 +214,7 @@ build-node:
 
 # Build the contracts used for tests
 build-contracts:
-    cd crates/shared/primitives/contracts && forge soldeer install && forge build
+    cd crates/utilities/test-utils/contracts && forge soldeer install && forge build
 
 # Cleans the workspace
 clean:
@@ -147,18 +240,27 @@ watch-check:
 # Runs all benchmarks
 benches:
     @just bench-flashblocks
+    @just bench-proof-mpt
 
 # Runs flashblocks pending state benchmarks
 bench-flashblocks:
     cargo bench -p base-flashblocks --bench pending_state
 
+# Runs MPT trie node benchmarks
+bench-proof-mpt:
+    cargo bench -p base-proof-mpt --bench trie_node
+
 # Stops devnet, deletes data, and starts fresh
 devnet: devnet-down
     docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml up -d --build --scale contender=0
 
+# Stops devnet, deletes data, and starts fresh with profiling (Pyroscope + optimized builds)
+devnet-profiling: devnet-down
+    CARGO_PROFILE=profiling docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml --profile profiling up -d --build --scale contender=0
+
 # Stops devnet and deletes all data
 devnet-down:
-    -docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml down
+    -docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml --profile profiling down
     rm -rf .devnet
 
 # Shows devnet block numbers and sync status
@@ -192,3 +294,20 @@ devnet-flashblocks:
 # Stream logs from devnet containers (optionally specify container names)
 devnet-logs *containers:
     docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml logs -f {{ containers }}
+
+# Stops devnet+ingress, deletes data, and starts fresh with full ingress stack
+devnet-ingress: devnet-ingress-down
+    docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml -f etc/docker/docker-compose.ingress.yml up -d --build --scale contender=0
+
+# Stops devnet+ingress and deletes all data
+devnet-ingress-down:
+    -docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml -f etc/docker/docker-compose.ingress.yml down
+    rm -rf .devnet
+
+# Stream logs from devnet+ingress containers (optionally specify container names)
+devnet-ingress-logs *containers:
+    docker compose --env-file etc/docker/devnet-env -f etc/docker/docker-compose.yml -f etc/docker/docker-compose.ingress.yml logs -f {{ containers }}
+
+# Run basectl with specified config (mainnet, sepolia, devnet, or path)
+basectl config="mainnet":
+    cargo run -p basectl --release -- -c {{config}}
