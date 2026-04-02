@@ -123,7 +123,7 @@ pub trait EthApiOverride {
         opts: SimulatePayload<OpTransactionRequest>,
         block_number: Option<u64>,
         block_index: Option<u64>,
-    ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Optimism>>>>;
+    ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Base>>>>;
 
     /// Returns logs matching the filter, including pending flashblock logs.
     #[method(name = "getLogs")]
