@@ -156,7 +156,7 @@ impl PendingBlocksBuilder {
     }
 
     /// Builds the pending blocks.
-    pub fn build(self) -> Result<PendingBlocks, StateProcessorError> {
+    pub fn build(self, tracker: Option<std::time::Instant>) -> Result<PendingBlocks, StateProcessorError> {
         let earliest_header = self.headers.first().cloned().ok_or(BuildError::MissingHeaders)?;
         let latest_header = self.headers.last().cloned().ok_or(BuildError::MissingHeaders)?;
 
@@ -186,6 +186,15 @@ impl PendingBlocksBuilder {
             for key in keys.into_iter().skip(5) {
                 merged_historical_state_overrides.remove(&key);
             }
+        }
+
+        if let Some(tracker) = tracker {
+            info!(
+                block = latest_header.number,
+                index = latest_flashblock_index,
+                took = ?tracker.elapsed(),
+                "built pending state"
+            );
         }
 
         Ok(PendingBlocks {
@@ -694,7 +703,7 @@ mod tests {
         builder.with_transaction_state(tx_hash, Default::default());
         builder.with_transaction_result(tx_hash, test_execution_result());
         builder.with_receipt(tx_hash, test_receipt(tx_hash, blob_gas_used));
-        (tx_hash, builder.build().expect("should build pending blocks"))
+        (tx_hash, builder.build(None).expect("should build pending blocks"))
     }
 
     #[test]
@@ -746,7 +755,7 @@ mod tests {
         builder.with_transaction_state(tx_hash, Default::default());
         builder.with_transaction_result(tx_hash, test_execution_result());
         // Intentionally skip with_receipt to test the no-receipt fallback path
-        let pending_blocks = builder.build().expect("should build pending blocks");
+        let pending_blocks = builder.build(None).expect("should build pending blocks");
 
         let result = pending_blocks.get_op_tx_result(&tx_hash).expect("should return tx result");
 

@@ -478,14 +478,9 @@ where
         // Extract the accumulated bundle state for state root calculation
         db.merge_transitions(BundleRetention::Reverts);
         pending_blocks_builder.with_bundle_state(db.take_bundle());
-        pending_blocks_builder.with_historical_state_overrides(historical_state_overrides);
         pending_blocks_builder.with_state_overrides(state_overrides);
+        pending_blocks_builder.with_historical_state_overrides(historical_state_overrides);
 
-        info!(
-            took = ?tracker.elapsed(),
-            "built pending state",
-        );
-
-        Ok(Some(Arc::new(pending_blocks_builder.build()?)))
+        Ok(Some(Arc::new(pending_blocks_builder.build(Some(tracker))?)))
     }
 }
