@@ -1,6 +1,6 @@
 //! RPC trait definitions and implementations for flashblocks.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap as StdHashMap, sync::Arc, time::Duration};
 
 use alloy_eips::{BlockId, BlockNumberOrTag};
 
@@ -57,7 +57,7 @@ use alloy_primitives::{
 use alloy_rpc_types::{
     BlockOverrides,
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
-    state::{EvmOverrides, StateOverride, StateOverridesBuilder},
+    state::{AccountOverride, EvmOverrides, StateOverride, StateOverridesBuilder},
 };
 use alloy_rpc_types_eth::{Filter, Log};
 use base_alloy_network::Base;
@@ -163,6 +163,15 @@ pub trait EthApiOverride {
         &self,
         number: BlockNumberOrTag,
     ) -> RpcResult<Option<U256>>;
+
+    /// Gets the historical state overrides for the pending blocks at a specific block number and index.
+    #[method(name = "getHistoricalStateOverridesAt")]
+    async fn get_historical_state_overrides_at(
+        &self,
+        block_number: u64,
+        block_index: u64,
+        accounts: Vec<Address>,
+    ) -> RpcResult<StdHashMap<Address, AccountOverride>>;
 }
 
 /// Extended Eth API with flashblocks support.
@@ -579,6 +588,39 @@ where
             .await
             .map(|opt| opt.map(U256::from))
             .map_err(Into::into)
+    }
+
+    async fn get_historical_state_overrides_at(
+        &self,
+        block_number: u64,
+        block_index: u64,
+        accounts: Vec<Address>,
+    ) -> RpcResult<StdHashMap<Address, AccountOverride>> {
+        debug!(
+            block_number = %block_number,
+            block_index = %block_index,
+            accounts = ?accounts,
+            "rpc::get_historical_state_overrides_at"
+        );
+
+        let pending_blocks = self.flashblocks_state.get_pending_blocks();
+        let state_overrides = pending_blocks
+            .get_historical_state_overrides_at(block_number, block_index)
+            .ok_or_else(|| {
+                let err: ErrorObjectOwned = EthApiError::HeaderNotFound(
+                    BlockId::number(block_number),
+                )
+                .into();
+                err
+            })?;
+
+        let mut overrides = StdHashMap::new();
+        for account in accounts {
+            if let Some(state) = state_overrides.get(&account) {
+                overrides.insert(account, state.clone());
+            }
+        }
+        Ok(overrides)
     }
 }
 

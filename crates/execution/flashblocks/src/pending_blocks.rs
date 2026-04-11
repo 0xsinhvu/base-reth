@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap as StdHashMap, sync::Arc, time::Instant};
 
 use alloy_consensus::{Header, Sealed};
 use alloy_eips::BlockNumberOrTag;
@@ -28,6 +28,9 @@ use revm::{
 
 use crate::{BuildError, Metrics, PendingBlocksAPI, StateProcessorError, TransactionWithLogs};
 
+/// Maximum number of historical state override snapshots retained per pending state.
+const MAX_HISTORICAL_OVERRIDES: usize = 5;
+
 /// Builder for [`PendingBlocks`].
 #[derive(Debug)]
 pub struct PendingBlocksBuilder {
@@ -42,6 +45,7 @@ pub struct PendingBlocksBuilder {
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
     state_overrides: Option<StateOverride>,
+    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
     transaction_results: HashMap<B256, ExecutionResult<OpHaltReason>>,
     execution_times: HashMap<B256, u128>,
     state_root_times: HashMap<B256, u128>,
@@ -72,6 +76,7 @@ impl PendingBlocksBuilder {
             execution_times: HashMap::new(),
             state_root_times: HashMap::new(),
             state_overrides: None,
+            historical_state_overrides: StdHashMap::new(),
             bundle_state: BundleState::default(),
         }
     }
@@ -143,6 +148,13 @@ impl PendingBlocksBuilder {
         self
     }
 
+    /// Merges historical state overrides into the builder (additive, unlike `with_state_overrides`
+    /// which replaces).
+    pub fn with_historical_state_overrides(&mut self, historical_state_overrides: StdHashMap<(u64, u64), StateOverride>) -> &Self {
+        self.historical_state_overrides.extend(historical_state_overrides);
+        self
+    }
+
     /// Sets the accumulated bundle state.
     #[inline]
     pub fn with_bundle_state(&mut self, bundle_state: BundleState) -> &Self {
@@ -175,13 +187,47 @@ impl PendingBlocksBuilder {
         self
     }
 
-    /// Builds the pending blocks.
-    pub fn build(self) -> Result<PendingBlocks, StateProcessorError> {
+    /// Snapshots the current state overrides (state_diff only, stripped of balance/nonce/code)
+    /// into the historical map keyed by `(block_number, flashblock_index)`, and prunes entries
+    /// beyond [`MAX_HISTORICAL_OVERRIDES`].
+    fn snapshot_historical_overrides(&mut self, block_number: u64, flashblock_index: u64) {
+        let mut cutoff = self.state_overrides.clone().unwrap_or_default();
+        cutoff.retain(|_, acc| acc.state_diff.as_ref().is_some_and(|d| !d.is_empty()));
+        for acc in cutoff.values_mut() {
+            acc.balance = None;
+            acc.nonce = None;
+            acc.code = None;
+        }
+
+        self.historical_state_overrides.insert((block_number, flashblock_index), cutoff);
+
+        if self.historical_state_overrides.len() > MAX_HISTORICAL_OVERRIDES {
+            let mut keys: Vec<_> = self.historical_state_overrides.keys().copied().collect();
+            keys.sort_by(|a, b| b.cmp(a));
+            for key in keys.into_iter().skip(MAX_HISTORICAL_OVERRIDES) {
+                self.historical_state_overrides.remove(&key);
+            }
+        }
+    }
+
+    /// Builds the pending blocks. When `tracker` is provided, logs build timing.
+    pub fn build(mut self, tracker: Option<Instant>) -> Result<PendingBlocks, StateProcessorError> {
         let earliest_header = self.headers.first().cloned().ok_or(BuildError::MissingHeaders)?;
         let latest_header = self.headers.last().cloned().ok_or(BuildError::MissingHeaders)?;
 
         let latest_flashblock_index =
             self.flashblocks.last().map(|fb| fb.index).ok_or(BuildError::NoFlashblocks)?;
+
+        self.snapshot_historical_overrides(latest_header.number, latest_flashblock_index);
+
+        if let Some(tracker) = tracker {
+            info!(
+                block = latest_header.number,
+                index = latest_flashblock_index,
+                took = ?tracker.elapsed(),
+                "built pending blocks"
+            );
+        }
 
         Ok(PendingBlocks {
             earliest_header,
@@ -196,6 +242,7 @@ impl PendingBlocksBuilder {
             transaction_state: self.transaction_state,
             transaction_senders: self.transaction_senders,
             state_overrides: self.state_overrides,
+            historical_state_overrides: self.historical_state_overrides,
             bundle_state: self.bundle_state,
             transaction_results: self.transaction_results,
             execution_times: self.execution_times,
@@ -220,6 +267,7 @@ pub struct PendingBlocks {
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
     state_overrides: Option<StateOverride>,
+    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
     transaction_results: HashMap<B256, ExecutionResult<OpHaltReason>>,
     execution_times: HashMap<B256, u128>,
     state_root_times: HashMap<B256, u128>,
@@ -400,6 +448,11 @@ impl PendingBlocks {
         self.state_overrides.clone()
     }
 
+    /// Returns a reference to the historical state overrides.
+    pub fn get_historical_state_overrides(&self) -> &StdHashMap<(u64, u64), StateOverride> {
+        &self.historical_state_overrides
+    }
+
     /// Returns logs matching the filter from pending state.
     pub fn get_pending_logs(&self, filter: &Filter) -> Vec<Log> {
         let mut logs = Vec::new();
@@ -544,6 +597,12 @@ impl PendingBlocksAPI for Guard<Option<Arc<PendingBlocks>>> {
 
     fn get_state_overrides(&self) -> Option<StateOverride> {
         self.as_ref().map(|pb| pb.get_state_overrides()).unwrap_or_default()
+    }
+
+    fn get_historical_state_overrides_at(&self, block_number: u64, block_index: u64) -> Option<StateOverride> {
+        self.as_ref().and_then(|pb| {
+            pb.get_historical_state_overrides().get(&(block_number, block_index)).cloned()
+        })
     }
 
     fn get_pending_logs(&self, filter: &Filter) -> Vec<Log> {
@@ -768,7 +827,7 @@ mod tests {
         builder.with_transaction_state(tx_hash, Default::default());
         builder.with_transaction_result(tx_hash, test_execution_result());
         builder.with_receipt(tx_hash, test_receipt(tx_hash, blob_gas_used));
-        (tx_hash, builder.build().expect("should build pending blocks"))
+        (tx_hash, builder.build(None).expect("should build pending blocks"))
     }
 
     /// Builds a [`PendingBlocks`] with the supplied (hash, `log_address`) pairs
@@ -784,7 +843,7 @@ mod tests {
             builder.with_receipt(hash, test_receipt_with_log(hash, addr));
         }
 
-        builder.build().expect("build should succeed")
+        builder.build(None).expect("build should succeed")
     }
 
     #[test]
@@ -836,7 +895,7 @@ mod tests {
         builder.with_transaction_state(tx_hash, Default::default());
         builder.with_transaction_result(tx_hash, test_execution_result());
         // Intentionally skip with_receipt to test the no-receipt fallback path
-        let pending_blocks = builder.build().expect("should build pending blocks");
+        let pending_blocks = builder.build(None).expect("should build pending blocks");
 
         let result = pending_blocks.get_op_tx_result(&tx_hash).expect("should return tx result");
 
