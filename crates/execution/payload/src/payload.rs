@@ -12,16 +12,15 @@ use alloy_rpc_types_engine::{
     BlobsBundleV1, ExecutionPayloadEnvelopeV2, ExecutionPayloadFieldV2, ExecutionPayloadV1,
     ExecutionPayloadV3, PayloadId,
 };
-use base_alloy_consensus::{
-    EIP1559ParamError, encode_holocene_extra_data, encode_jovian_extra_data,
-};
+use base_alloy_chains::BaseUpgrades;
+use base_alloy_consensus::{EIP1559ParamError, HoloceneExtraData, JovianExtraData};
 /// Re-export for use in downstream arguments.
 pub use base_alloy_rpc_types_engine::OpPayloadAttributes;
 use base_alloy_rpc_types_engine::{
-    OpExecutionPayloadEnvelopeV3, OpExecutionPayloadEnvelopeV4, OpExecutionPayloadV4,
+    BlobsBundleV2, OpExecutionPayloadEnvelopeV3, OpExecutionPayloadEnvelopeV4,
+    OpExecutionPayloadEnvelopeV5, OpExecutionPayloadV4,
 };
 use base_execution_evm::OpNextBlockEnvAttributes;
-use base_execution_forks::OpHardforks;
 use base_execution_primitives::OpPrimitives;
 use reth_chainspec::EthChainSpec;
 use reth_payload_builder::{EthPayloadBuilderAttributes, PayloadBuilderError};
@@ -32,7 +31,7 @@ use reth_primitives_traits::{
     NodePrimitives, SealedBlock, SealedHeader, SignedTransaction, WithEncoded,
 };
 
-/// Optimism Payload Builder Attributes
+/// Base Payload Builder Attributes
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpPayloadBuilderAttributes<T> {
     /// Inner ethereum payload builder attributes
@@ -71,7 +70,7 @@ impl<T> OpPayloadBuilderAttributes<T> {
         default_base_fee_params: BaseFeeParams,
     ) -> Result<Bytes, EIP1559ParamError> {
         self.eip_1559_params
-            .map(|params| encode_holocene_extra_data(params, default_base_fee_params))
+            .map(|params| HoloceneExtraData::encode(params, default_base_fee_params))
             .ok_or(EIP1559ParamError::NoEIP1559Params)?
     }
 
@@ -83,7 +82,7 @@ impl<T> OpPayloadBuilderAttributes<T> {
     ) -> Result<Bytes, EIP1559ParamError> {
         let min_base_fee = self.min_base_fee.ok_or(EIP1559ParamError::MinBaseFeeNotSet)?;
         self.eip_1559_params
-            .map(|params| encode_jovian_extra_data(params, default_base_fee_params, min_base_fee))
+            .map(|params| JovianExtraData::encode(params, default_base_fee_params, min_base_fee))
             .ok_or(EIP1559ParamError::NoEIP1559Params)?
     }
 }
@@ -341,6 +340,42 @@ where
     }
 }
 
+impl<T, N> From<OpBuiltPayload<N>> for OpExecutionPayloadEnvelopeV5
+where
+    T: SignedTransaction,
+    N: NodePrimitives<Block = Block<T>>,
+{
+    fn from(value: OpBuiltPayload<N>) -> Self {
+        let OpBuiltPayload { block, fees, .. } = value;
+
+        let l2_withdrawals_root = block.withdrawals_root.unwrap_or_default();
+        let payload_v3 = ExecutionPayloadV3::from_block_unchecked(
+            block.hash(),
+            &Arc::unwrap_or_clone(block).into_block(),
+        );
+
+        Self {
+            execution_payload: OpExecutionPayloadV4::from_v3_with_withdrawals_root(
+                payload_v3,
+                l2_withdrawals_root,
+            ),
+            block_value: fees,
+            // No blobs for Base.
+            blobs_bundle: BlobsBundleV2::default(),
+            // From the engine API spec:
+            //
+            // > Client software **MAY** use any heuristics to decide whether to set
+            // `shouldOverrideBuilder` flag or not. If client software does not implement any
+            // heuristic this flag **SHOULD** be set to `false`.
+            //
+            // Spec:
+            // <https://github.com/ethereum/execution-apis/blob/fe8e13c288c592ec154ce25c534e26cb7ce0530d/src/engine/cancun.md#specification-2>
+            should_override_builder: false,
+            execution_requests: vec![],
+        }
+    }
+}
+
 /// Generates the payload id for the configured payload from the [`OpPayloadAttributes`].
 ///
 /// Returns an 8-byte identifier by hashing the payload components with sha256 hash.
@@ -408,7 +443,7 @@ impl<H, T, ChainSpec> BuildNextEnv<OpPayloadBuilderAttributes<T>, H, ChainSpec>
 where
     H: BlockHeader,
     T: SignedTransaction,
-    ChainSpec: EthChainSpec + OpHardforks,
+    ChainSpec: EthChainSpec + BaseUpgrades,
 {
     fn build_next_env(
         attributes: &OpPayloadBuilderAttributes<T>,

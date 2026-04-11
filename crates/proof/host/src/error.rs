@@ -1,10 +1,9 @@
-//! Error types for host operations.
-
 use std::array::TryFromSliceError;
 
 use alloy_rlp::Error as RlpError;
 use alloy_transport::TransportError;
-use base_proof_preimage::errors::PreimageOracleError;
+use base_proof_client::FaultProofProgramError;
+use base_proof_preimage::errors::{PreimageOracleError, WitnessOracleError};
 use thiserror::Error;
 
 /// Result type for host operations.
@@ -28,9 +27,6 @@ pub enum HostError {
     /// Failed precompile execution.
     #[error("Failed precompile execution: {0}")]
     PrecompileExecutionFailed(String),
-    /// No rollup config found for chain ID.
-    #[error("No rollup config found for chain ID: {0}")]
-    NoRollupConfig(u64),
     /// Output root mismatch.
     #[error("Output root does not match L2 head")]
     OutputRootMismatch,
@@ -71,6 +67,12 @@ pub enum HostError {
     /// Error fetching code hash preimage.
     #[error("Error fetching code hash preimage: {0}")]
     CodeHashPreimageFetchFailed(String),
+    /// Failed to serve a preimage request.
+    #[error("Failed to serve preimage request: {0}")]
+    PreimageRequestFailed(PreimageOracleError),
+    /// Failed to route a hint.
+    #[error("Failed to route hint: {0}")]
+    RouteHintFailed(PreimageOracleError),
     /// Transport error.
     #[error("Transport error: {0}")]
     Transport(#[from] TransportError),
@@ -85,13 +87,25 @@ pub enum HostError {
     SerdeJson(#[from] serde_json::Error),
     /// Preimage oracle error.
     #[error("Preimage oracle error: {0}")]
-    PreimageOracle(#[from] PreimageOracleError),
+    PreimageOracle(PreimageOracleError),
     /// Base derive error.
     #[error("Base derive error: {0}")]
     BaseDerive(String),
     /// Base executor error.
     #[error("Base executor error: {0}")]
     BaseExecutor(String),
+    /// Proof program error.
+    #[error(transparent)]
+    ProofProgram(Box<FaultProofProgramError>),
+    /// Preimage server exited unexpectedly during witness capture.
+    #[error("preimage server exited unexpectedly")]
+    ServerExitedUnexpectedly,
+    /// Preimage server panicked during witness capture.
+    #[error("preimage server panicked: {0}")]
+    ServerPanicked(tokio::task::JoinError),
+    /// Witness oracle error.
+    #[error("Witness oracle error: {0}")]
+    WitnessOracle(#[from] WitnessOracleError),
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

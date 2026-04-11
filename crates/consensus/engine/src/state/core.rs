@@ -22,7 +22,7 @@ use crate::Metrics;
 /// 4. **Safe** - Cross-verified with safe L1 dependencies
 /// 5. **Finalized** - Derived from finalized L1 data only
 ///
-/// See the [OP Stack specifications](https://specs.optimism.io) for detailed safety definitions.
+/// See the [Base specifications](https://specs.optimism.io) for detailed safety definitions.
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct EngineSyncState {
     /// Most recent block found on the P2P network (lowest safety level).
@@ -124,7 +124,7 @@ impl EngineSyncState {
     #[cfg(feature = "metrics")]
     #[inline]
     fn update_block_label_metric(label: &'static str, number: u64) {
-        base_macros::set!(gauge, Metrics::BLOCK_LABELS, "label", label, number as f64);
+        base_metrics::set!(gauge, Metrics::BLOCK_LABELS, "label", label, number as f64);
     }
 
     /// Updates a block label metric, keyed by the label.
@@ -181,10 +181,12 @@ impl EngineState {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
+    #[cfg(feature = "metrics")]
     use base_protocol::BlockInfo;
     #[cfg(feature = "metrics")]
     use metrics_exporter_prometheus::PrometheusBuilder;
+    #[cfg(feature = "metrics")]
     use rstest::rstest;
 
     use super::*;

@@ -7,7 +7,7 @@ use alloy_primitives::{Address, Bytes};
 use async_trait::async_trait;
 use base_protocol::BlockInfo;
 
-use crate::{ChainProvider, DataAvailabilityProvider, PipelineError, PipelineResult};
+use crate::{ChainProvider, DataAvailabilityProvider, Metrics, PipelineError, PipelineResult};
 
 /// A data iterator that reads from calldata.
 #[derive(Debug, Clone)]
@@ -77,12 +77,8 @@ impl<CP: ChainProvider + Send> CalldataSource<CP> {
             })
             .collect::<VecDeque<_>>();
 
-        #[cfg(feature = "metrics")]
-        metrics::gauge!(
-            crate::metrics::Metrics::PIPELINE_DATA_AVAILABILITY_PROVIDER,
-            "source" => "calldata",
-        )
-        .increment(self.calldata.len() as f64);
+        Metrics::pipeline_data_availability_provider("calldata")
+            .increment(self.calldata.len() as f64);
 
         self.open = true;
 
@@ -294,5 +290,32 @@ mod tests {
             source.next(&BlockInfo::default(), Address::ZERO).await,
             Err(PipelineErrorKind::Temporary(_))
         ));
+    }
+
+    /// After a `SystemConfig` batcher address update (modeled as changing the
+    /// `batcher_address` passed to `load_calldata`), transactions signed by the
+    /// OLD batcher are rejected while transactions signed by the NEW batcher
+    /// are accepted.
+    #[tokio::test]
+    async fn test_calldata_source_rejects_old_batcher_after_config_update() {
+        let batch_inbox_address = address!("0123456789012345678901234567890123456789");
+        let tx = test_legacy_tx(batch_inbox_address);
+        let original_batcher = tx.recover_signer().unwrap();
+
+        let mut source = default_test_calldata_source();
+        source.batch_inbox_address = batch_inbox_address;
+        let block_info = BlockInfo::default();
+        source.chain_provider.insert_block_with_transactions(0, block_info, vec![tx.clone()]);
+
+        // With the original batcher address, calldata is accepted.
+        assert!(source.load_calldata(&block_info, original_batcher).await.is_ok());
+        assert!(!source.calldata.is_empty());
+
+        // Simulate batcher rotation: clear source state and use a new batcher address.
+        source.clear();
+        let rotated_batcher = address!("00000000000000000000000000000000DeaDBeef");
+        assert!(source.load_calldata(&block_info, rotated_batcher).await.is_ok());
+        // The same transaction is now rejected because the signer does not match.
+        assert!(source.calldata.is_empty());
     }
 }

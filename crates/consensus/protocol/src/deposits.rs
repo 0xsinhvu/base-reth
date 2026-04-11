@@ -257,7 +257,7 @@ pub(crate) fn unmarshal_deposit_version0(
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec;
 
     use alloy_primitives::{LogData, U64, U128, address, b256, hex};

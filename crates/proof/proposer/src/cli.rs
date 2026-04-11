@@ -1,16 +1,20 @@
 //! CLI argument definitions for proposer.
 
-use std::{net::IpAddr, time::Duration};
+use std::time::Duration;
 
 use alloy_primitives::{Address, B256};
 use base_cli_utils::CliStyles;
 use clap::Parser;
 use url::Url;
 
+base_cli_utils::define_cli_env!("BASE_PROPOSER");
 base_cli_utils::define_log_args!("BASE_PROPOSER");
 base_cli_utils::define_metrics_args!("BASE_PROPOSER", 7300);
+base_cli_utils::define_health_args!("BASE_PROPOSER", 8080);
+base_tx_manager::define_signer_cli!("BASE_PROPOSER");
+base_tx_manager::define_tx_manager_cli!("BASE_PROPOSER");
 
-/// Proposer - TEE-based output proposal generation for OP Stack chains.
+/// Proposer - TEE-based output proposal generation for Base.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "proposer")]
 #[command(version, about, long_about = None)]
@@ -28,258 +32,216 @@ pub struct Cli {
     #[command(flatten)]
     pub metrics: MetricsArgs,
 
-    /// RPC server configuration arguments.
+    /// Health server configuration arguments.
     #[command(flatten)]
-    pub rpc: RpcServerArgs,
+    pub health: HealthArgs,
+
+    /// Admin RPC configuration arguments.
+    #[command(flatten)]
+    pub admin: AdminArgs,
 }
 
 /// Core proposer configuration arguments.
 #[derive(Debug, Clone, Parser)]
 #[command(next_help_heading = "Proposer")]
 pub struct ProposerArgs {
+    /// Dry-run mode: source proofs but do not submit transactions on-chain.
+    #[arg(long = "dry-run", env = cli_env!("DRY_RUN"), default_value = "false")]
+    pub dry_run: bool,
+
     /// Allow proposals based on non-finalized L1 data.
     #[arg(
         long = "allow-non-finalized",
-        env = "BASE_PROPOSER_ALLOW_NON_FINALIZED",
+        env = cli_env!("ALLOW_NON_FINALIZED"),
         default_value = "false"
     )]
     pub allow_non_finalized: bool,
 
-    /// URL of the enclave RPC endpoint.
-    #[arg(
-        long = "enclave-rpc",
-        env = "BASE_PROPOSER_ENCLAVE_RPC",
-        value_parser = parse_url
-    )]
-    pub enclave_rpc: Url,
+    /// URL of the prover RPC endpoint.
+    #[arg(long = "prover-rpc", env = cli_env!("PROVER_RPC"))]
+    pub prover_rpc: Url,
 
     /// URL of the L1 Ethereum RPC endpoint.
-    #[arg(
-        long = "l1-eth-rpc",
-        env = "BASE_PROPOSER_L1_ETH_RPC",
-        value_parser = parse_url
-    )]
+    #[arg(long = "l1-eth-rpc", env = cli_env!("L1_ETH_RPC"))]
     pub l1_eth_rpc: Url,
 
     /// URL of the L2 Ethereum RPC endpoint.
-    #[arg(
-        long = "l2-eth-rpc",
-        env = "BASE_PROPOSER_L2_ETH_RPC",
-        value_parser = parse_url
-    )]
+    #[arg(long = "l2-eth-rpc", env = cli_env!("L2_ETH_RPC"))]
     pub l2_eth_rpc: Url,
 
-    /// Use reth-specific RPC calls for L2.
-    #[arg(long = "l2-reth", env = "BASE_PROPOSER_L2_RETH", default_value = "false")]
-    pub l2_reth: bool,
-
     /// Address of the `AnchorStateRegistry` contract on L1.
-    #[arg(
-        long = "anchor-state-registry-addr",
-        env = "BASE_PROPOSER_ANCHOR_STATE_REGISTRY_ADDR",
-        value_parser = parse_address
-    )]
+    #[arg(long = "anchor-state-registry-addr", env = cli_env!("ANCHOR_STATE_REGISTRY_ADDR"))]
     pub anchor_state_registry_addr: Address,
 
     /// Address of the `DisputeGameFactory` contract on L1.
-    #[arg(
-        long = "dispute-game-factory-addr",
-        env = "BASE_PROPOSER_DISPUTE_GAME_FACTORY_ADDR",
-        value_parser = parse_address
-    )]
+    #[arg(long = "dispute-game-factory-addr", env = cli_env!("DISPUTE_GAME_FACTORY_ADDR"))]
     pub dispute_game_factory_addr: Address,
 
     /// Game type ID for `AggregateVerifier` dispute games.
-    #[arg(long = "game-type", env = "BASE_PROPOSER_GAME_TYPE")]
+    #[arg(long = "game-type", env = cli_env!("GAME_TYPE"))]
     pub game_type: u32,
 
     /// Keccak256 hash of the TEE image PCR0 (0x-prefixed hex).
-    #[arg(
-        long = "tee-image-hash",
-        env = "BASE_PROPOSER_TEE_IMAGE_HASH",
-        value_parser = parse_b256
-    )]
+    #[arg(long = "tee-image-hash", env = cli_env!("TEE_IMAGE_HASH"))]
     pub tee_image_hash: B256,
 
     /// Polling interval for new blocks (e.g., "12s", "1m").
     #[arg(
         long = "poll-interval",
-        env = "BASE_PROPOSER_POLL_INTERVAL",
+        env = cli_env!("POLL_INTERVAL"),
         default_value = "12s",
-        value_parser = parse_duration
+        value_parser = humantime::parse_duration
     )]
     pub poll_interval: Duration,
 
     /// RPC request timeout (e.g., "30s", "1m").
     #[arg(
         long = "rpc-timeout",
-        env = "BASE_PROPOSER_RPC_TIMEOUT",
+        env = cli_env!("RPC_TIMEOUT"),
         default_value = "30s",
-        value_parser = parse_duration
+        value_parser = humantime::parse_duration
     )]
     pub rpc_timeout: Duration,
 
     /// URL of the rollup RPC endpoint.
-    #[arg(
-        long = "rollup-rpc",
-        env = "BASE_PROPOSER_ROLLUP_RPC",
-        value_parser = parse_url
-    )]
+    #[arg(long = "rollup-rpc", env = cli_env!("ROLLUP_RPC"))]
     pub rollup_rpc: Url,
 
     /// Skip TLS certificate verification.
     #[arg(
         long = "skip-tls-verify",
-        env = "BASE_PROPOSER_SKIP_TLS_VERIFY",
+        env = cli_env!("SKIP_TLS_VERIFY"),
         default_value = "false"
     )]
     pub skip_tls_verify: bool,
 
     /// Wait for node sync before starting.
-    #[arg(long = "wait-node-sync", env = "BASE_PROPOSER_WAIT_NODE_SYNC", default_value = "false")]
+    #[arg(long = "wait-node-sync", env = cli_env!("WAIT_NODE_SYNC"), default_value = "false")]
     pub wait_node_sync: bool,
 
     /// Maximum number of retry attempts for RPC operations.
-    #[arg(long = "rpc-max-retries", env = "BASE_PROPOSER_RPC_MAX_RETRIES", default_value = "5")]
+    #[arg(long = "rpc-max-retries", env = cli_env!("RPC_MAX_RETRIES"), default_value = "5")]
     pub rpc_max_retries: u32,
 
     /// Initial delay for exponential backoff (e.g., "100ms", "1s").
     #[arg(
         long = "rpc-retry-initial-delay",
-        env = "BASE_PROPOSER_RPC_RETRY_INITIAL_DELAY",
+        env = cli_env!("RPC_RETRY_INITIAL_DELAY"),
         default_value = "100ms",
-        value_parser = parse_duration
+        value_parser = humantime::parse_duration
     )]
     pub rpc_retry_initial_delay: Duration,
 
     /// Maximum delay between retry attempts (e.g., "10s", "1m").
     #[arg(
         long = "rpc-retry-max-delay",
-        env = "BASE_PROPOSER_RPC_RETRY_MAX_DELAY",
+        env = cli_env!("RPC_RETRY_MAX_DELAY"),
         default_value = "10s",
-        value_parser = parse_duration
+        value_parser = humantime::parse_duration
     )]
     pub rpc_retry_max_delay: Duration,
 
-    /// Private key for local transaction signing (hex-encoded, for development).
-    /// Mutually exclusive with --signer-endpoint/--signer-address.
-    #[arg(long = "private-key", env = "BASE_PROPOSER_PRIVATE_KEY")]
-    pub private_key: Option<String>,
+    /// Signer configuration (local key or remote sidecar).
+    #[command(flatten)]
+    pub signer: SignerCli,
 
-    /// URL of the signer sidecar JSON-RPC endpoint (for production).
-    /// Must be used together with --signer-address.
+    /// Maximum number of concurrent proof tasks in parallel pipeline mode.
+    /// Set to 1 for sequential proving (default driver behavior).
     #[arg(
-        long = "signer-endpoint",
-        env = "BASE_PROPOSER_SIGNER_ENDPOINT",
-        value_parser = parse_url
+        long = "max-parallel-proofs",
+        env = cli_env!("MAX_PARALLEL_PROOFS"),
+        default_value = "1"
     )]
-    pub signer_endpoint: Option<Url>,
+    pub max_parallel_proofs: usize,
 
-    /// Address of the signer account on the signer sidecar.
-    /// Must be used together with --signer-endpoint.
+    /// Maximum number of games to scan backwards when recovering state on startup.
+    /// Must be greater than the maximum number of pending (unresolved) dispute games
+    /// that could exist at any given time. For production deployments with high game
+    /// volume, increase this beyond the default to ensure the proposer can always
+    /// find and resume from its most recent game after a restart.
     #[arg(
-        long = "signer-address",
-        env = "BASE_PROPOSER_SIGNER_ADDRESS",
-        value_parser = parse_address
+        long = "max-game-recovery-lookback",
+        env = cli_env!("MAX_GAME_RECOVERY_LOOKBACK"),
+        default_value = "5000"
     )]
-    pub signer_address: Option<Address>,
+    pub max_game_recovery_lookback: u64,
+
+    /// Address of the `TEEProverRegistry` contract on L1.
+    /// When set, the proposer validates signers before on-chain submission.
+    #[arg(
+        long = "tee-prover-registry-address",
+        env = cli_env!("TEE_PROVER_REGISTRY_ADDRESS")
+    )]
+    pub tee_prover_registry_address: Option<Address>,
+
+    /// Transaction manager configuration.
+    #[command(flatten)]
+    pub tx_manager: TxManagerCli,
 }
 
-/// RPC server configuration arguments.
+/// Admin RPC server configuration arguments.
 #[derive(Debug, Clone, Parser)]
-#[command(next_help_heading = "RPC Server")]
-pub struct RpcServerArgs {
-    /// Enable admin RPC methods.
+#[command(next_help_heading = "Admin RPC")]
+pub struct AdminArgs {
+    /// Enable the admin RPC server.
     #[arg(
         id = "rpc_enable_admin",
         long = "rpc.enable-admin",
-        env = "BASE_PROPOSER_RPC_ENABLE_ADMIN",
+        env = cli_env!("RPC_ENABLE_ADMIN"),
         default_value = "false"
     )]
-    pub enable_admin: bool,
+    pub enabled: bool,
 
-    /// RPC server bind address.
+    /// Admin RPC server bind address.
     #[arg(
         id = "rpc_addr",
         long = "rpc.addr",
-        env = "BASE_PROPOSER_RPC_ADDR",
-        default_value = "127.0.0.1"
+        default_value = "127.0.0.1",
+        env = cli_env!("RPC_ADDR")
     )]
-    pub addr: IpAddr,
+    pub addr: std::net::IpAddr,
 
-    /// RPC server port.
+    /// Admin RPC server port.
     #[arg(
         id = "rpc_port",
         long = "rpc.port",
-        env = "BASE_PROPOSER_RPC_PORT",
-        default_value = "8545"
+        default_value = "8545",
+        env = cli_env!("RPC_PORT")
     )]
     pub port: u16,
 }
 
-/// Parse a duration string like "12s", "5m", "1h".
-fn parse_duration(s: &str) -> Result<Duration, humantime::DurationError> {
-    humantime::parse_duration(s)
+impl Default for AdminArgs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            addr: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            port: 8545,
+        }
+    }
 }
 
-/// Parse a URL string.
-fn parse_url(s: &str) -> Result<Url, url::ParseError> {
-    Url::parse(s)
-}
-
-/// Parse an Ethereum address from hex string.
-fn parse_address(s: &str) -> Result<Address, alloy_primitives::hex::FromHexError> {
-    s.parse()
-}
-
-/// Parse a 32-byte hash from hex string (0x-prefixed).
-fn parse_b256(s: &str) -> Result<B256, alloy_primitives::hex::FromHexError> {
-    s.parse()
+impl AdminArgs {
+    /// Returns the configured socket address.
+    pub const fn socket_addr(&self) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(self.addr, self.port)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use base_cli_utils::LogFormat;
 
     use super::*;
-
-    #[test]
-    fn test_parse_duration_valid() {
-        assert_eq!(parse_duration("12s").unwrap(), Duration::from_secs(12));
-        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
-        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
-    }
-
-    #[test]
-    fn test_parse_url_valid() {
-        let url = parse_url("https://example.com").unwrap();
-        assert_eq!(url.scheme(), "https");
-        assert_eq!(url.host_str(), Some("example.com"));
-    }
-
-    #[test]
-    fn test_parse_url_invalid() {
-        assert!(parse_url("not-a-url").is_err());
-    }
-
-    #[test]
-    fn test_parse_address_valid() {
-        let addr = parse_address("0x1234567890123456789012345678901234567890").unwrap();
-        assert_eq!(addr.to_string(), "0x1234567890123456789012345678901234567890");
-    }
-
-    #[test]
-    fn test_parse_address_invalid() {
-        assert!(parse_address("0xnotanaddress").is_err());
-        assert!(parse_address("invalid").is_err());
-    }
 
     #[test]
     fn test_cli_defaults() {
         // Test that we can construct minimal CLI args (requires all required fields)
         let args = vec![
             "proposer",
-            "--enclave-rpc",
+            "--prover-rpc",
             "http://localhost:8080",
             "--l1-eth-rpc",
             "http://localhost:8545",
@@ -299,14 +261,16 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
 
         // Check defaults
+        assert!(!cli.proposer.dry_run);
         assert!(!cli.proposer.allow_non_finalized);
-        assert!(!cli.proposer.l2_reth);
         assert_eq!(cli.proposer.poll_interval, Duration::from_secs(12));
         assert_eq!(cli.proposer.rpc_timeout, Duration::from_secs(30));
         assert_eq!(cli.proposer.rollup_rpc.as_str(), "http://localhost:7545/");
         assert!(!cli.proposer.skip_tls_verify);
         assert!(!cli.proposer.wait_node_sync);
         assert_eq!(cli.proposer.game_type, 1);
+        assert_eq!(cli.proposer.max_parallel_proofs, 1);
+        assert_eq!(cli.proposer.max_game_recovery_lookback, 5000);
 
         assert_eq!(cli.logging.level, 3);
         assert_eq!(cli.logging.stdout_format, LogFormat::Full);
@@ -316,9 +280,11 @@ mod tests {
         assert_eq!(cli.metrics.addr, "0.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(cli.metrics.port, 7300);
 
-        assert!(!cli.rpc.enable_admin);
-        assert_eq!(cli.rpc.addr, "127.0.0.1".parse::<IpAddr>().unwrap());
-        assert_eq!(cli.rpc.port, 8545);
+        assert!(!cli.admin.enabled);
+        assert_eq!(cli.admin.addr, "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(cli.admin.port, 8545);
+        assert_eq!(cli.health.addr, "0.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(cli.health.port, 8080);
 
         // Check retry defaults
         assert_eq!(cli.proposer.rpc_max_retries, 5);
@@ -326,9 +292,9 @@ mod tests {
         assert_eq!(cli.proposer.rpc_retry_max_delay, Duration::from_secs(10));
 
         // Check signing defaults (all None)
-        assert!(cli.proposer.private_key.is_none());
-        assert!(cli.proposer.signer_endpoint.is_none());
-        assert!(cli.proposer.signer_address.is_none());
+        assert!(cli.proposer.signer.private_key.is_none());
+        assert!(cli.proposer.signer.signer_endpoint.is_none());
+        assert!(cli.proposer.signer.signer_address.is_none());
     }
 
     #[test]
@@ -342,7 +308,7 @@ mod tests {
     fn test_cli_missing_rollup_rpc() {
         let args = vec![
             "proposer",
-            "--enclave-rpc",
+            "--prover-rpc",
             "http://localhost:8080",
             "--l1-eth-rpc",
             "http://localhost:8545",

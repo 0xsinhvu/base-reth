@@ -8,6 +8,28 @@ use base_consensus_registry::Registry;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+/// Configuration for a single node in an HA conductor cluster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConductorNodeConfig {
+    /// Human-readable name for this node (e.g. "op-conductor-0").
+    pub name: String,
+    /// Conductor JSON-RPC endpoint (serves `conductor_*` methods).
+    pub conductor_rpc: Url,
+    /// Consensus-layer JSON-RPC endpoint (serves `optimism_*` and `opp2p_*` methods).
+    pub cl_rpc: Url,
+    /// Raft server ID used when targeting this node for leadership transfer.
+    pub server_id: String,
+    /// Raft peer address (`host:port`) used when targeting this node for leadership transfer.
+    pub raft_addr: String,
+    /// Flashblocks WebSocket endpoint for this sequencer's builder node.
+    ///
+    /// When set, the command center will automatically reconnect its flashblocks
+    /// stream to the current Raft leader's endpoint whenever leadership changes,
+    /// rather than staying connected to the original leader's now-idle socket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flashblocks_ws: Option<Url>,
+}
+
 /// Monitoring configuration for a chain watched by basectl.
 ///
 /// This is a TUI/monitoring-specific runtime config and is intentionally
@@ -41,6 +63,29 @@ pub struct ChainConfig {
     /// Expected number of blobs per L1 block target.
     #[serde(default = "default_blob_target")]
     pub l1_blob_target: u64,
+    /// HA conductor cluster nodes, if this chain runs an op-conductor setup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductors: Option<Vec<ConductorNodeConfig>>,
+}
+
+impl ChainConfig {
+    /// Returns the block explorer base URL for this chain, if known.
+    pub fn explorer_base_url(&self) -> Option<&'static str> {
+        match self.name.as_str() {
+            "mainnet" => Some("https://basescan.org"),
+            "sepolia" => Some("https://sepolia.basescan.org"),
+            _ => None,
+        }
+    }
+
+    /// Returns the L1 explorer base URL for this chain, if known.
+    pub fn l1_explorer_base_url(&self) -> Option<&'static str> {
+        match self.name.as_str() {
+            "mainnet" => Some("https://etherscan.io"),
+            "sepolia" => Some("https://sepolia.etherscan.io"),
+            _ => None,
+        }
+    }
 }
 
 const fn default_blob_target() -> u64 {
@@ -59,6 +104,7 @@ struct ChainConfigOverride {
     #[serde(default)]
     batcher_address: Option<Address>,
     l1_blob_target: Option<u64>,
+    conductors: Option<Vec<ConductorNodeConfig>>,
 }
 
 impl ChainConfig {
@@ -75,6 +121,7 @@ impl ChainConfig {
             system_config: rollup.l1_system_config_address,
             batcher_address: Some("0x5050F69a9786F081509234F1a7F4684b5E5b76C9".parse().unwrap()),
             l1_blob_target: 14,
+            conductors: None,
         }
     }
 
@@ -91,6 +138,7 @@ impl ChainConfig {
             system_config: rollup.l1_system_config_address,
             batcher_address: Some("0xfc56E7272EEBBBA5bC6c544e159483C4a38f8bA3".parse().unwrap()),
             l1_blob_target: 14,
+            conductors: None,
         }
     }
 
@@ -113,6 +161,32 @@ impl ChainConfig {
             system_config: Address::ZERO,
             batcher_address: None,
             l1_blob_target: 14,
+            conductors: Some(vec![
+                ConductorNodeConfig {
+                    name: "op-conductor-0".to_string(),
+                    conductor_rpc: Url::parse("http://localhost:6545").unwrap(),
+                    cl_rpc: Url::parse("http://localhost:7549").unwrap(),
+                    server_id: "sequencer-0".to_string(),
+                    raft_addr: "op-conductor-0:5050".to_string(),
+                    flashblocks_ws: Some(Url::parse("ws://localhost:7111").unwrap()),
+                },
+                ConductorNodeConfig {
+                    name: "op-conductor-1".to_string(),
+                    conductor_rpc: Url::parse("http://localhost:6546").unwrap(),
+                    cl_rpc: Url::parse("http://localhost:10549").unwrap(),
+                    server_id: "sequencer-1".to_string(),
+                    raft_addr: "op-conductor-1:5051".to_string(),
+                    flashblocks_ws: Some(Url::parse("ws://localhost:10111").unwrap()),
+                },
+                ConductorNodeConfig {
+                    name: "op-conductor-2".to_string(),
+                    conductor_rpc: Url::parse("http://localhost:6547").unwrap(),
+                    cl_rpc: Url::parse("http://localhost:11549").unwrap(),
+                    server_id: "sequencer-2".to_string(),
+                    raft_addr: "op-conductor-2:5052".to_string(),
+                    flashblocks_ws: Some(Url::parse("ws://localhost:11111").unwrap()),
+                },
+            ]),
         }
     }
 
@@ -215,6 +289,7 @@ impl ChainConfig {
             system_config: overrides.system_config.unwrap_or(base.system_config),
             batcher_address: overrides.batcher_address.or(base.batcher_address),
             l1_blob_target: overrides.l1_blob_target.unwrap_or(base.l1_blob_target),
+            conductors: overrides.conductors.or(base.conductors),
         })
     }
 

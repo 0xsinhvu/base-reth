@@ -1,13 +1,13 @@
 //! Async trait definitions for RPC clients.
 
 use alloy_primitives::{Address, B256, Bytes, U256};
-use alloy_rpc_types_eth::{Header, TransactionReceipt};
+use alloy_rpc_types_eth::{EIP1186AccountProofResponse, Header, TransactionReceipt};
 use async_trait::async_trait;
-use base_enclave::{AccountResult, RollupConfig};
+use base_consensus_genesis::RollupConfig;
 
 use super::{
     error::RpcResult,
-    types::{OpBlock, SyncStatus},
+    types::{OpBlock, OutputAtBlock, SyncStatus},
 };
 
 /// L1 RPC provider trait for interacting with Ethereum.
@@ -43,14 +43,18 @@ pub trait L1Provider: Send + Sync {
     async fn get_balance(&self, address: Address) -> RpcResult<U256>;
 }
 
-/// L2 RPC provider trait for interacting with OP Stack chains.
+/// L2 RPC provider trait for interacting with Base.
 #[async_trait]
 pub trait L2Provider: Send + Sync {
     /// Gets the chain configuration via `debug_chainConfig`.
     async fn chain_config(&self) -> RpcResult<serde_json::Value>;
 
     /// Gets an account proof via `eth_getProof`.
-    async fn get_proof(&self, address: Address, block_hash: B256) -> RpcResult<AccountResult>;
+    async fn get_proof(
+        &self,
+        address: Address,
+        block_hash: B256,
+    ) -> RpcResult<EIP1186AccountProofResponse>;
 
     /// Gets a header by block number.
     /// If `number` is `None`, returns the latest header.
@@ -64,7 +68,7 @@ pub trait L2Provider: Send + Sync {
     async fn block_by_hash(&self, hash: B256) -> RpcResult<OpBlock>;
 }
 
-/// Rollup RPC provider trait for interacting with OP Stack rollup nodes.
+/// Rollup RPC provider trait for interacting with Base rollup nodes.
 #[async_trait]
 pub trait RollupProvider: Send + Sync {
     /// Gets the rollup configuration via `optimism_rollupConfig`.
@@ -72,4 +76,7 @@ pub trait RollupProvider: Send + Sync {
 
     /// Gets the sync status via `optimism_syncStatus`.
     async fn sync_status(&self) -> RpcResult<SyncStatus>;
+
+    /// Gets the output root at a specific L2 block via `optimism_outputAtBlock`.
+    async fn output_at_block(&self, block_number: u64) -> RpcResult<OutputAtBlock>;
 }

@@ -1,4 +1,4 @@
-//! Transaction receipt types for OP chains.
+//! Transaction receipt types for Base chains.
 
 use alloy_consensus::{
     Eip658Value, Receipt, ReceiptWithBloom, RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt,
@@ -9,7 +9,7 @@ use alloy_rlp::{Buf, BufMut, Decodable, Encodable, Header};
 use super::OpTxReceipt;
 use crate::transaction::OpDepositInfo;
 
-/// [`OpDepositReceipt`] with calculated bloom filter, modified for the OP Stack.
+/// [`OpDepositReceipt`] with calculated bloom filter, modified for Base.
 ///
 /// This convenience type allows us to lazily calculate the bloom filter for a
 /// receipt, similar to [`Sealed`].

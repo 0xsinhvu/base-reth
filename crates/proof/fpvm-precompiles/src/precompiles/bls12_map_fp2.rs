@@ -57,7 +57,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_primitives::hex;
 
     use super::*;

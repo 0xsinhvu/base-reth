@@ -1,9 +1,9 @@
 //! Contains the `[OpSpecId]` type and its implementation.
 use core::str::FromStr;
 
-use revm::primitives::hardfork::{SpecId, UnknownHardfork, name as eth_name};
+use revm::primitives::hardfork::{SpecId, UnknownHardfork};
 
-/// Optimism spec id.
+/// Base spec id.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -28,8 +28,8 @@ pub enum OpSpecId {
     ISTHMUS,
     /// Jovian spec id.
     JOVIAN,
-    /// Osaka spec id.
-    OSAKA,
+    /// Base V1 spec id.
+    BASE_V1,
 }
 
 impl OpSpecId {
@@ -40,7 +40,7 @@ impl OpSpecId {
             Self::CANYON => SpecId::SHANGHAI,
             Self::ECOTONE | Self::FJORD | Self::GRANITE | Self::HOLOCENE => SpecId::CANCUN,
             Self::ISTHMUS | Self::JOVIAN => SpecId::PRAGUE,
-            Self::OSAKA => SpecId::OSAKA,
+            Self::BASE_V1 => SpecId::OSAKA,
         }
     }
 
@@ -70,7 +70,7 @@ impl FromStr for OpSpecId {
             name::HOLOCENE => Ok(Self::HOLOCENE),
             name::ISTHMUS => Ok(Self::ISTHMUS),
             name::JOVIAN => Ok(Self::JOVIAN),
-            eth_name::OSAKA => Ok(Self::OSAKA),
+            name::BASE_V1 => Ok(Self::BASE_V1),
             _ => Err(UnknownHardfork),
         }
     }
@@ -88,12 +88,12 @@ impl From<OpSpecId> for &'static str {
             OpSpecId::HOLOCENE => name::HOLOCENE,
             OpSpecId::ISTHMUS => name::ISTHMUS,
             OpSpecId::JOVIAN => name::JOVIAN,
-            OpSpecId::OSAKA => eth_name::OSAKA,
+            OpSpecId::BASE_V1 => name::BASE_V1,
         }
     }
 }
 
-/// String identifiers for Optimism hardforks
+/// String identifiers for Base hardforks
 pub mod name {
     /// Bedrock spec name.
     pub const BEDROCK: &str = "Bedrock";
@@ -113,6 +113,8 @@ pub mod name {
     pub const ISTHMUS: &str = "Isthmus";
     /// Jovian spec name.
     pub const JOVIAN: &str = "Jovian";
+    /// Base V1 spec name.
+    pub const BASE_V1: &str = "V1";
 }
 
 #[cfg(test)]
@@ -206,6 +208,26 @@ mod tests {
                     (OpSpecId::FJORD, true),
                     (OpSpecId::HOLOCENE, true),
                     (OpSpecId::ISTHMUS, true),
+                ],
+            ),
+            (
+                OpSpecId::BASE_V1,
+                vec![
+                    (SpecId::OSAKA, true),
+                    (SpecId::PRAGUE, true),
+                    (SpecId::SHANGHAI, true),
+                    (SpecId::CANCUN, true),
+                    (SpecId::MERGE, true),
+                ],
+                vec![
+                    (OpSpecId::BEDROCK, true),
+                    (OpSpecId::REGOLITH, true),
+                    (OpSpecId::CANYON, true),
+                    (OpSpecId::ECOTONE, true),
+                    (OpSpecId::FJORD, true),
+                    (OpSpecId::HOLOCENE, true),
+                    (OpSpecId::ISTHMUS, true),
+                    (OpSpecId::JOVIAN, true),
                 ],
             ),
         ];

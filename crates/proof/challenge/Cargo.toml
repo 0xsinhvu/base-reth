@@ -1,0 +1,90 @@
+[package]
+name = "base-challenger"
+description = "Base Challenger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Alloy
+alloy-rlp.workspace = true
+alloy-provider.workspace = true
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-signer-local.workspace = true
+alloy-rpc-types-eth.workspace = true
+alloy-trie = { workspace = true, features = ["std"] }
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# Tracing
+tracing.workspace = true
+
+# Serialization
+serde.workspace = true
+
+# Error handling
+eyre.workspace = true
+thiserror.workspace = true
+
+# CLI
+clap.workspace = true
+base-cli-utils.workspace = true
+
+# Contracts
+base-proof-contracts.workspace = true
+
+# Transaction management
+base-tx-manager.workspace = true
+
+# RPC
+base-proof-rpc.workspace = true
+
+# ZK proof client
+base-zk-client.workspace = true
+
+# Protocol
+base-protocol.workspace = true
+
+# Proof
+base-proof-primitives = { workspace = true, features = ["serde", "std", "rpc-client"] }
+
+# JSON-RPC
+jsonrpsee.workspace = true
+
+# Metrics
+metrics.workspace = true
+
+# TLS
+rustls = { workspace = true, features = ["ring"] }
+
+# Shutdown
+tokio-util.workspace = true
+
+# Health
+base-health = { workspace = true, features = ["axum-server"] }
+
+# Misc
+url.workspace = true
+humantime.workspace = true
+uuid = { workspace = true, features = ["v5"] }
+
+# Test utilities (optional)
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+rstest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+base-challenger = { path = ".", features = ["test-utils"] }
+
+[features]
+test-utils = [ "base-protocol/test-utils", "serde_json" ]

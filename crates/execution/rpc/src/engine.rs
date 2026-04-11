@@ -1,4 +1,4 @@
-//! Implements the Optimism engine API RPC methods.
+//! Implements the Base engine API RPC methods.
 
 use alloy_eips::eip7685::Requests;
 use alloy_primitives::{B256, BlockHash, U64};
@@ -16,7 +16,7 @@ use reth_rpc_api::IntoEngineApiRpcModule;
 use reth_rpc_engine_api::EngineApi;
 use reth_storage_api::{BlockReader, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::TransactionPool;
-use tracing::{debug, trace};
+use tracing::{debug, instrument, trace};
 
 /// The list of all supported Engine capabilities available over the engine endpoint.
 ///
@@ -29,6 +29,7 @@ pub const OP_ENGINE_CAPABILITIES: &[&str] = &[
     "engine_getPayloadV2",
     "engine_getPayloadV3",
     "engine_getPayloadV4",
+    "engine_getPayloadV5",
     "engine_newPayloadV2",
     "engine_newPayloadV3",
     "engine_newPayloadV4",
@@ -36,12 +37,12 @@ pub const OP_ENGINE_CAPABILITIES: &[&str] = &[
     "engine_getPayloadBodiesByRangeV1",
 ];
 
-/// Extension trait that gives access to Optimism engine API RPC methods.
+/// Extension trait that gives access to Base engine API RPC methods.
 ///
 /// Note:
 /// > The provider should use a JWT authentication layer.
 ///
-/// This follows the Optimism specs that can be found at:
+/// This follows the Base specs that can be found at:
 /// <https://specs.optimism.io/protocol/exec-engine.html#engine-api>
 #[cfg_attr(not(feature = "client"), rpc(server, namespace = "engine"), server_bounds(Engine::PayloadAttributes: jsonrpsee::core::DeserializeOwned))]
 #[cfg_attr(feature = "client", rpc(server, client, namespace = "engine", client_bounds(Engine::PayloadAttributes: jsonrpsee::core::Serialize + Clone), server_bounds(Engine::PayloadAttributes: jsonrpsee::core::DeserializeOwned)))]
@@ -178,6 +179,23 @@ pub trait OpEngineApi<Engine: EngineTypes> {
         payload_id: PayloadId,
     ) -> RpcResult<Engine::ExecutionPayloadEnvelopeV4>;
 
+    /// Returns the most recent version of the payload that is available in the corresponding
+    /// payload build process at the time of receiving this call.
+    ///
+    /// See also <https://github.com/ethereum/execution-apis/blob/main/src/engine/osaka.md#engine_getpayloadv5>
+    ///
+    /// Note:
+    /// > Provider software MAY stop the corresponding build process after serving this call.
+    ///
+    /// Returns the [`OpExecutionPayloadEnvelopeV5`], which uses
+    /// [`OpExecutionPayloadV4`](base_alloy_rpc_types_engine::OpExecutionPayloadV4) for the
+    /// execution payload and otherwise follows the V5 envelope shape.
+    #[method(name = "getPayloadV5")]
+    async fn get_payload_v5(
+        &self,
+        payload_id: PayloadId,
+    ) -> RpcResult<Engine::ExecutionPayloadEnvelopeV5>;
+
     /// Returns the execution payload bodies by the given hash.
     ///
     /// See also <https://github.com/ethereum/execution-apis/blob/6452a6b194d7db269bf1dbd087a267251d3cc7f8/src/engine/shanghai.md#engine_getpayloadbodiesbyhashv1>
@@ -288,14 +306,37 @@ where
         Ok(self.inner.new_payload_v4_metered(payload).await?)
     }
 
+    #[instrument(
+        level = "debug",
+        target = "rpc::engine",
+        skip_all,
+        fields(
+            head = ?fork_choice_state.head_block_hash,
+            safe = ?fork_choice_state.safe_block_hash,
+            finalized = ?fork_choice_state.finalized_block_hash,
+            has_attributes = payload_attributes.is_some()
+        )
+    )]
     async fn fork_choice_updated_v1(
         &self,
         fork_choice_state: ForkchoiceState,
         payload_attributes: Option<EngineT::PayloadAttributes>,
     ) -> RpcResult<ForkchoiceUpdated> {
+        trace!(target: "rpc::engine", "Serving engine_forkchoiceUpdatedV1");
         Ok(self.inner.fork_choice_updated_v1_metered(fork_choice_state, payload_attributes).await?)
     }
 
+    #[instrument(
+        level = "debug",
+        target = "rpc::engine",
+        skip_all,
+        fields(
+            head = ?fork_choice_state.head_block_hash,
+            safe = ?fork_choice_state.safe_block_hash,
+            finalized = ?fork_choice_state.finalized_block_hash,
+            has_attributes = payload_attributes.is_some()
+        )
+    )]
     async fn fork_choice_updated_v2(
         &self,
         fork_choice_state: ForkchoiceState,
@@ -305,6 +346,17 @@ where
         Ok(self.inner.fork_choice_updated_v2_metered(fork_choice_state, payload_attributes).await?)
     }
 
+    #[instrument(
+        level = "debug",
+        target = "rpc::engine",
+        skip_all,
+        fields(
+            head = ?fork_choice_state.head_block_hash,
+            safe = ?fork_choice_state.safe_block_hash,
+            finalized = ?fork_choice_state.finalized_block_hash,
+            has_attributes = payload_attributes.is_some()
+        )
+    )]
     async fn fork_choice_updated_v3(
         &self,
         fork_choice_state: ForkchoiceState,
@@ -314,14 +366,16 @@ where
         Ok(self.inner.fork_choice_updated_v3_metered(fork_choice_state, payload_attributes).await?)
     }
 
+    #[instrument(level = "debug", target = "rpc::engine", skip_all, fields(id = %payload_id))]
     async fn get_payload_v2(
         &self,
         payload_id: PayloadId,
     ) -> RpcResult<EngineT::ExecutionPayloadEnvelopeV2> {
-        debug!(target: "rpc::engine", id = %payload_id, "Serving engine_getPayloadV2");
+        debug!(target: "rpc::engine", "Serving engine_getPayloadV2");
         Ok(self.inner.get_payload_v2_metered(payload_id).await?)
     }
 
+    #[instrument(level = "debug", target = "rpc::engine", skip_all, fields(id = %payload_id))]
     async fn get_payload_v3(
         &self,
         payload_id: PayloadId,
@@ -330,12 +384,22 @@ where
         Ok(self.inner.get_payload_v3_metered(payload_id).await?)
     }
 
+    #[instrument(level = "debug", target = "rpc::engine", skip_all, fields(id = %payload_id))]
     async fn get_payload_v4(
         &self,
         payload_id: PayloadId,
     ) -> RpcResult<EngineT::ExecutionPayloadEnvelopeV4> {
         trace!(target: "rpc::engine", "Serving engine_getPayloadV4");
         Ok(self.inner.get_payload_v4_metered(payload_id).await?)
+    }
+
+    #[instrument(level = "debug", target = "rpc::engine", skip_all, fields(id = %payload_id))]
+    async fn get_payload_v5(
+        &self,
+        payload_id: PayloadId,
+    ) -> RpcResult<EngineT::ExecutionPayloadEnvelopeV5> {
+        trace!(target: "rpc::engine", "Serving engine_getPayloadV5");
+        Ok(self.inner.get_payload_v5_metered(payload_id).await?)
     }
 
     async fn get_payload_bodies_by_hash_v1(

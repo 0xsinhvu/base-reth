@@ -144,7 +144,7 @@ impl From<DatabaseError> for OpProofsStorageError {
 pub type OpProofsStorageResult<T> = Result<T, OpProofsStorageError>;
 
 #[cfg(test)]
-mod test {
+mod tests {
     use reth_execution_errors::BlockValidationError;
 
     use super::*;

@@ -40,7 +40,7 @@ impl BatchTransaction {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec;
 
     use super::*;

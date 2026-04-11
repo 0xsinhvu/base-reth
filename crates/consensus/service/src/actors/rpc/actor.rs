@@ -1,6 +1,6 @@
 //! RPC Server Actor
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use base_consensus_gossip::P2pRpcRequest;
@@ -9,6 +9,7 @@ use base_consensus_rpc::{
     HealthzRpc, L1WatcherQueries, NetworkAdminQuery, OpP2PApiServer, P2pRpc, RollupNodeApiServer,
     RollupRpc, RpcBuilder, SequencerAdminAPIClient, WsRPC, WsServer,
 };
+use base_consensus_safedb::SafeDBReader;
 use base_health::EthHealthCheckLayer;
 use derive_more::Constructor;
 use jsonrpsee::{
@@ -32,15 +33,16 @@ where
 
     engine_rpc_client: EngineRpcClient_,
     sequencer_admin_rpc_client: Option<SequencerAdminApiClient_>,
+    safe_db_reader: Arc<dyn SafeDBReader>,
 }
 
 /// The communication context used by the RPC actor.
 #[derive(Debug)]
 pub struct RpcContext {
     /// The network p2p rpc sender.
-    pub p2p_network: mpsc::Sender<P2pRpcRequest>,
+    pub p2p_network: Option<mpsc::Sender<P2pRpcRequest>>,
     /// The network admin rpc sender.
-    pub network_admin: mpsc::Sender<NetworkAdminQuery>,
+    pub network_admin: Option<mpsc::Sender<NetworkAdminQuery>>,
     /// The l1 watcher queries sender.
     pub l1_watcher_queries: mpsc::Sender<L1WatcherQueries>,
     /// The cancellation token, shared between all tasks.
@@ -106,13 +108,22 @@ where
         modules.merge(HealthzApiServer::into_rpc(HealthzRpc {}))?;
 
         // Build the p2p rpc module.
-        modules.merge(P2pRpc::new(p2p_network).into_rpc())?;
+        if let Some(p2p_network) = p2p_network {
+            modules.merge(P2pRpc::new(p2p_network).into_rpc())?;
+        }
 
         // Build the admin rpc module.
-        modules.merge(AdminRpc::new(self.sequencer_admin_rpc_client, network_admin).into_rpc())?;
+        if let Some(network_admin) = network_admin {
+            modules
+                .merge(AdminRpc::new(self.sequencer_admin_rpc_client, network_admin).into_rpc())?;
+        }
 
         // Create context for communication between actors.
-        let rollup_rpc = RollupRpc::new(self.engine_rpc_client.clone(), l1_watcher_queries);
+        let rollup_rpc = RollupRpc::new(
+            self.engine_rpc_client.clone(),
+            l1_watcher_queries,
+            Arc::clone(&self.safe_db_reader),
+        );
         modules.merge(rollup_rpc.into_rpc())?;
 
         // Add development RPC module for engine state introspection if enabled

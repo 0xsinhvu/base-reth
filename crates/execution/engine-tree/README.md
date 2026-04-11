@@ -111,16 +111,20 @@ This design maximizes parallelism — execution, receipt root computation, state
 
 ## Dependencies
 
-This crate builds on top of several Reth and OP Stack components:
+This crate builds on top of several Reth and Base components:
 - `reth-engine-tree`: Engine tree traits, state management, and payload processing
 - `reth-consensus`: Consensus validation rules
 - `reth-evm`: EVM configuration and block execution
 - `reth-provider`: State and storage access
 - `reth-trie` / `reth-trie-parallel`: Trie computation (serial and parallel)
-- `base-execution-evm`: OP Stack EVM specializations
+- `base-execution-evm`: Base EVM specializations
 
 ## Related Crates
 
 - **`base-engine`**: Engine validator builder that constructs `BaseEngineValidator` instances
 - **`base-flashblocks`**: Provides cached execution results that integrate with `CachedExecutor`
 - **`base-client-node`**: Node builder extensions that wire up the full validation pipeline
+
+## License
+
+Licensed under the [MIT License](https://github.com/base/base/blob/main/LICENSE).

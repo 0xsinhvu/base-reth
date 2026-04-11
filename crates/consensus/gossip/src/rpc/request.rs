@@ -17,7 +17,7 @@ use super::{
     PeerDump, PeerStats,
     types::{Connectedness, Direction, PeerInfo, PeerScores},
 };
-use crate::{ConnectionGate, GossipDriver, GossipScores};
+use crate::{ConnectionGate, GossipDriver, GossipScores, Metrics};
 
 /// A p2p RPC Request.
 #[derive(Debug)]
@@ -188,12 +188,9 @@ impl P2pRpcRequest {
             info!(target: "p2p::rpc", peer_id = %peer_id, "Disconnected peer");
             // Record the duration of the peer connection.
             if let Some(start_time) = gossip.peer_connection_start.remove(&peer_id) {
-                let _peer_duration = start_time.elapsed();
-                base_macros::record!(
-                    histogram,
-                    crate::Metrics::GOSSIP_PEER_CONNECTION_DURATION_SECONDS,
-                    _peer_duration.as_secs_f64()
-                );
+                let peer_duration = start_time.elapsed();
+                Metrics::gossip_peer_connection_duration_seconds()
+                    .record(peer_duration.as_secs_f64());
             }
         }
     }
@@ -212,13 +209,13 @@ impl P2pRpcRequest {
                 Ok(dt) => dt.into_iter().map(|e| e.to_string()).collect(),
 
                 Err(e) => {
-                    warn!(target: "p2p_rpc", error = ?e, "Failed to receive peer count");
+                    warn!(target: "p2p_rpc", error = ?e, "Failed to receive discovery table");
                     return;
                 }
             };
 
             if let Err(e) = sender.send(dt) {
-                warn!(target: "p2p_rpc", error = ?e, "Failed to send peer count through response channel");
+                warn!(target: "p2p_rpc", error = ?e, "Failed to send discovery table through response channel");
             }
         });
     }
@@ -465,7 +462,7 @@ impl P2pRpcRequest {
                 banned_ips,
                 banned_subnets,
             }) {
-                warn!(target: "p2p::rpc", error = ?e, "Failed to send peer info through response channel");
+                warn!(target: "p2p::rpc", error = ?e, "Failed to send peer dump through response channel");
             }
         });
     }

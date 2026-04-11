@@ -57,7 +57,7 @@ impl SpanBatchEip1559TransactionData {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec::Vec;
 
     use alloy_rlp::{Decodable, Encodable};

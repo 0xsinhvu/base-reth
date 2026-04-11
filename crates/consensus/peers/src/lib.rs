@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![doc(
     html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
     issue_tracker_base_url = "https://github.com/base/base/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
@@ -9,13 +10,11 @@
 #[macro_use]
 extern crate tracing;
 
-/// Alias for a peer identifier.
-///
-/// This is the most primitive secp256k1 public key identifier for a given peer.
-pub type PeerId = alloy_primitives::B512;
+mod id;
+pub use id::PeerId;
 
 mod nodes;
-pub use nodes::{BootNodes, OP_RAW_BOOTNODES, OP_RAW_TESTNET_BOOTNODES};
+pub use nodes::BootNodes;
 
 mod store;
 pub use store::{BootStore, BootStoreFile};

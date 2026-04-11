@@ -210,7 +210,7 @@ pub struct P2PArgs {
     /// Optionally enable topic scoring.
     ///
     /// Topic scoring is a mechanism to score peers based on their behavior in the gossip network.
-    /// Historically, topic scoring was only enabled for the v1 topic on the OP Stack p2p network
+    /// Historically, topic scoring was only enabled for the v1 topic on the Base p2p network
     /// in the `op-node`. This was a silent bug, and topic scoring is actively being
     /// [phased out of the `op-node`][out].
     ///
@@ -347,7 +347,22 @@ impl P2PArgs {
 
             let mut provider = AlloyChainProvider::new_http(l1_eth_rpc, 1024);
             let latest_block_num = provider.latest_block_number().await?;
-            let block_info = provider.block_info_by_number(latest_block_num).await?;
+
+            // The L1 EL may report a latest block number that it has not fully executed
+            // yet (race between header sync and execution). Retry once with the previous
+            // block to avoid a fatal startup crash on transient L1 RPC errors.
+            let block_info = match provider.block_info_by_number(latest_block_num).await {
+                Ok(info) => info,
+                Err(err) => {
+                    warn!(
+                        target: "p2p::flags",
+                        block_number = latest_block_num,
+                        error = %err,
+                        "Failed to fetch latest L1 block info, retrying with previous block"
+                    );
+                    provider.block_info_by_number(latest_block_num.saturating_sub(1)).await?
+                }
+            };
 
             // Fetch the unsafe block signer address from the system config.
             let unsafe_block_signer_address = provider
@@ -360,9 +375,23 @@ impl P2PArgs {
                 .await?;
 
             // Convert the unsafe block signer address to the correct type.
-            return Ok(alloy_primitives::Address::from_slice(
+            let signer = alloy_primitives::Address::from_slice(
                 &unsafe_block_signer_address.to_be_bytes_vec()[12..],
-            ));
+            );
+
+            // If storage returns zero (e.g. L1 is still early in sync and the SystemConfig
+            // contract hadn't been deployed at the queried block), fall through to the
+            // genesis/registry signer rather than using the zero address.
+            if !signer.is_zero() {
+                return Ok(signer);
+            }
+
+            warn!(
+                target: "p2p::flags",
+                block_number = block_info.number,
+                "L1 SystemConfig returned zero unsafe block signer (L1 may still be syncing), \
+                 falling back to registry/genesis signer"
+            );
         }
 
         // Otherwise use the genesis signer or the configured unsafe block signer.
@@ -707,6 +736,58 @@ mod tests {
                 "enr:-J64QBbwPjPLZ6IOOToOLsSjtFUjjzN66qmBZdUexpO32Klrc458Q24kbty2PdRaLacHM5z-cZQr8mjeQu3pik6jPSOGAYYFIqBfgmlkgnY0gmlwhDaRWFWHb3BzdGFja4SzlAUAiXNlY3AyNTZrMaECmeSnJh7zjKrDSPoNMGXoopeDF4hhpj5I0OsQUUt4u8uDdGNwgiQGg3VkcIIkBg",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_unsafe_block_signer_uses_genesis_when_no_l1() {
+        let args = MockCommand::parse_from(["test"]).p2p;
+        let genesis: Address = "0xAf6E19BE0F9cE7f8afd49a1824851023A8249e8a".parse().unwrap();
+        let signer = args
+            .unsafe_block_signer(8453, &RollupConfig::default(), None, Some(genesis))
+            .await
+            .unwrap();
+        assert_eq!(signer, genesis);
+    }
+
+    #[tokio::test]
+    async fn test_unsafe_block_signer_uses_cli_flag_when_no_genesis() {
+        let expected: Address = "0xAf6E19BE0F9cE7f8afd49a1824851023A8249e8a".parse().unwrap();
+        let args = MockCommand::parse_from([
+            "test",
+            "--p2p.unsafe.block.signer",
+            "0xAf6E19BE0F9cE7f8afd49a1824851023A8249e8a",
+        ])
+        .p2p;
+        let signer =
+            args.unsafe_block_signer(8453, &RollupConfig::default(), None, None).await.unwrap();
+        assert_eq!(signer, expected);
+    }
+
+    #[tokio::test]
+    async fn test_unsafe_block_signer_genesis_takes_priority_over_cli() {
+        let genesis: Address = "0xAf6E19BE0F9cE7f8afd49a1824851023A8249e8a".parse().unwrap();
+        let args = MockCommand::parse_from([
+            "test",
+            "--p2p.unsafe.block.signer",
+            "0x0000000000000000000000000000000000000001",
+        ])
+        .p2p;
+        let signer = args
+            .unsafe_block_signer(8453, &RollupConfig::default(), None, Some(genesis))
+            .await
+            .unwrap();
+        assert_eq!(signer, genesis);
+    }
+
+    #[tokio::test]
+    async fn test_unsafe_block_signer_errors_with_no_fallbacks() {
+        let args = MockCommand::parse_from(["test"]).p2p;
+        let err = args
+            .unsafe_block_signer(99999, &RollupConfig::default(), None, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("99999"));
     }
 
     #[tokio::test]

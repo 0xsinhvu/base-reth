@@ -1,17 +1,19 @@
 use std::marker::PhantomData;
 
-use base_execution_forks::OpHardforks;
+use base_alloy_chains::BaseUpgrades;
 use base_execution_payload_builder::{
     OpAttributes, OpPayloadPrimitives,
     config::{OpDAConfig, OpGasLimitConfig},
 };
 use base_execution_rpc::{
+    config::{BaseEthConfigApiServer, BaseEthConfigHandler},
     eth::OpEthApiBuilder,
     miner::{MinerApiExtServer, OpMinerExtApi},
     witness::OpDebugWitnessApi,
 };
 use base_node_core::{OpEngineApiBuilder, OpEngineValidatorBuilder, OpNodeTypes};
 use base_txpool::OpPooledTx;
+use reth_chainspec::{EthereumHardforks, Hardforks};
 use reth_evm::ConfigureEvm;
 use reth_node_api::{BuildNextEnv, FullNodeComponents, HeaderTy, NodeAddOns, PayloadTypes, TxTy};
 use reth_node_builder::{
@@ -22,15 +24,16 @@ use reth_node_builder::{
         RethRpcMiddleware, RethRpcServerHandles, RpcAddOns, RpcContext, RpcHandle,
     },
 };
+use reth_primitives_traits::header::HeaderMut;
 use reth_rpc_api::{DebugApiServer, DebugExecutionWitnessApiServer};
 use reth_rpc_server_types::RethRpcModule;
 use reth_tracing::tracing::debug;
 use reth_transaction_pool::TransactionPool;
 use serde::de::DeserializeOwned;
 
-/// Add-ons w.r.t. optimism.
+/// Add-ons w.r.t. Base.
 ///
-/// This type provides optimism-specific addons to the node and exposes the RPC server and engine
+/// This type provides Base-specific addons to the node and exposes the RPC server and engine
 /// API.
 #[derive(Debug)]
 pub struct BaseAddOns<
@@ -180,7 +183,7 @@ impl<N, EthB, PVB, EB, EVB, Attrs, RpcMiddleware> NodeAddOns<N>
 where
     N: FullNodeComponents<
             Types: NodeTypes<
-                ChainSpec: OpHardforks,
+                ChainSpec: BaseUpgrades + EthereumHardforks + Hardforks,
                 Primitives: OpPayloadPrimitives,
                 Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
             >,
@@ -199,6 +202,7 @@ where
     EVB: EngineValidatorBuilder<N>,
     RpcMiddleware: RethRpcMiddleware,
     Attrs: OpAttributes<Transaction = TxTy<N::Types>, RpcPayloadAttributes: DeserializeOwned>,
+    <N::Types as NodeTypes>::Primitives: OpPayloadPrimitives<_Header: HeaderMut>,
 {
     type Handle = RpcHandle<N, EthB::EthApi>;
 
@@ -207,6 +211,8 @@ where
         ctx: reth_node_api::AddOnsContext<'_, N>,
     ) -> eyre::Result<Self::Handle> {
         let Self { rpc_add_ons, da_config, gas_limit_config, .. } = self;
+        let eth_config =
+            BaseEthConfigHandler::new(ctx.node.provider().clone(), ctx.node.evm_config().clone());
 
         let builder = base_execution_payload_builder::OpPayloadBuilder::new(
             ctx.node.pool().clone(),
@@ -225,6 +231,8 @@ where
             .launch_add_ons_with(ctx, move |container| {
                 let reth_node_builder::rpc::RpcModuleContainer { modules, auth_module, registry } =
                     container;
+
+                modules.merge_if_module_configured(RethRpcModule::Eth, eth_config.into_rpc())?;
 
                 debug!(target: "reth::cli", "Installing debug payload witness rpc endpoint");
                 modules.merge_if_module_configured(RethRpcModule::Debug, debug_ext.into_rpc())?;
@@ -258,7 +266,7 @@ impl<N, EthB, PVB, EB, EVB, Attrs, RpcMiddleware> RethRpcAddOns<N>
 where
     N: FullNodeComponents<
             Types: NodeTypes<
-                ChainSpec: OpHardforks,
+                ChainSpec: BaseUpgrades + EthereumHardforks + Hardforks,
                 Primitives: OpPayloadPrimitives,
                 Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
             >,
@@ -277,6 +285,7 @@ where
     EVB: EngineValidatorBuilder<N>,
     RpcMiddleware: RethRpcMiddleware,
     Attrs: OpAttributes<Transaction = TxTy<N::Types>, RpcPayloadAttributes: DeserializeOwned>,
+    <N::Types as NodeTypes>::Primitives: OpPayloadPrimitives<_Header: HeaderMut>,
 {
     type EthApi = EthB::EthApi;
 
@@ -302,7 +311,7 @@ where
     }
 }
 
-/// A regular optimism evm and executor builder.
+/// A regular Base EVM and executor builder.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BaseAddOnsBuilder<NetworkT, RpcMiddleware = Identity> {

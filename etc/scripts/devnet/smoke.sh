@@ -15,7 +15,7 @@ echo "Sending L1 blob tx..."
 echo "blob" | cast send --private-key $PK --rpc-url $L1_RPC --blob --path /dev/stdin $TO --json | jq -r '"Blob tx: \(.transactionHash) block=\(.blockNumber) status=\(.status) blobGas=\(.blobGasUsed)"'
 
 echo ""
-echo "=== L1 OP Stack Contract Verification ==="
+echo "=== L1 Base Contract Verification ==="
 ADDRESSES=".devnet/l2/configs/l1-addresses.json"
 echo "Checking OptimismPortal..." && cast code --rpc-url $L1_RPC $(cat $ADDRESSES | jq -r '.OptimismPortalProxy') | head -c 100 && echo "... (deployed)"
 echo "Checking SystemConfig..." && cast code --rpc-url $L1_RPC $(cat $ADDRESSES | jq -r '.SystemConfigProxy') | head -c 100 && echo "... (deployed)"
@@ -37,5 +37,5 @@ if curl -sf "$INGRESS_HEALTH_URL" >/dev/null 2>&1; then
     sleep 3  # wait for the previous tx's nonce to be reflected on-chain
     cast send --private-key $PK --rpc-url $L2_INGRESS_RPC_URL $TO --value 0.001ether --json | jq -r '"TX: \(.transactionHash) block=\(.blockNumber)"'
 else
-    echo "Ingress not running (start with: just devnet-ingress)"
+    echo "Ingress not running (start with: just devnet ingress)"
 fi

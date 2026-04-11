@@ -1,6 +1,6 @@
 [package]
 name = "base-builder-publish"
-description = "WebSocket broadcast publisher for the OP Stack block builder"
+description = "WebSocket broadcast publisher for the Base block builder"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,16 +12,15 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
 futures.workspace = true
 metrics.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tokio = { workspace = true, features = ["net", "sync", "macros", "rt"] }
-tokio-tungstenite.workspace = true
-tokio-util.workspace = true
 tracing.workspace = true
+tokio-util.workspace = true
+serde_json.workspace = true
+tokio-tungstenite.workspace = true
+tokio = { workspace = true, features = ["net", "sync", "macros", "rt"] }
 
 [dev-dependencies]
 rstest.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "macros", "rt", "test-util"] }
-tokio-tungstenite.workspace = true

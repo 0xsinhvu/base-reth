@@ -43,7 +43,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_eips::eip4844::VERSIONED_HASH_VERSION_KZG;
     use alloy_primitives::hex;
     use sha2::{Digest, Sha256};

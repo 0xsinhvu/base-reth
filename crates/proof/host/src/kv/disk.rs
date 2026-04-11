@@ -70,7 +70,7 @@ impl TryFrom<DiskKeyValueStore> for MemoryKeyValueStore {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::env::temp_dir;
 
     use proptest::{

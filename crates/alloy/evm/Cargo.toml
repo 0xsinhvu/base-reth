@@ -14,15 +14,16 @@ workspace = true
 
 [dependencies]
 # alloy
+alloy-evm.workspace = true
 alloy-eips.workspace = true
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
-alloy-evm.workspace = true
 
 # base
-base-alloy-consensus = { workspace = true, features = ["evm"] }
-base-alloy-hardforks.workspace = true
+base-alloy-flz.workspace = true
+base-alloy-chains.workspace = true
 base-revm = { workspace = true, features = ["alloy"] }
+base-alloy-consensus = { workspace = true, features = ["evm"] }
 
 # revm
 revm.workspace = true
@@ -43,6 +44,7 @@ std = [
 	"alloy-evm/std",
 	"alloy-primitives/std",
 	"base-alloy-consensus/std",
+	"base-alloy-flz/std",
 	"base-revm/std",
 	"revm/std",
 	"thiserror/std",

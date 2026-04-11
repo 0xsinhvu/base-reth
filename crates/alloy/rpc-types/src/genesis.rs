@@ -3,7 +3,7 @@
 use alloy_serde::OtherFields;
 use serde::de::Error;
 
-/// Container type for all OP chain-specific fields in a genesis file.
+/// Container type for all Base chain-specific fields in a genesis file.
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpChainInfo {
@@ -14,7 +14,7 @@ pub struct OpChainInfo {
 }
 
 impl OpChainInfo {
-    /// Extracts the OP chain-specific fields from a genesis file. These fields are expected to be
+    /// Extracts the Base chain-specific fields from a genesis file. These fields are expected to be
     /// contained in the `genesis.config` under `extra_fields` property.
     pub fn extract_from(others: &OtherFields) -> Option<Self> {
         Self::try_from(others).ok()
@@ -32,7 +32,15 @@ impl TryFrom<&OtherFields> for OpChainInfo {
     }
 }
 
-/// The OP chain-specific genesis block specification.
+/// Base-specific hardfork configuration in a genesis file.
+#[derive(Default, Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpBaseHardforkInfo {
+    /// Base V1 hardfork timestamp.
+    pub v1: Option<u64>,
+}
+
+/// The Base chain-specific genesis block specification.
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpGenesisInfo {
@@ -54,10 +62,13 @@ pub struct OpGenesisInfo {
     pub isthmus_time: Option<u64>,
     /// jovian hardfork timestamp
     pub jovian_time: Option<u64>,
+    /// Base-specific hardfork activation times.
+    #[serde(default)]
+    pub base: OpBaseHardforkInfo,
 }
 
 impl OpGenesisInfo {
-    /// Extract the OP chain-specific genesis info from a genesis file.
+    /// Extract the Base chain-specific genesis info from a genesis file.
     pub fn extract_from(others: &OtherFields) -> Option<Self> {
         Self::try_from(others).ok()
     }
@@ -71,7 +82,7 @@ impl TryFrom<&OtherFields> for OpGenesisInfo {
     }
 }
 
-/// The OP chain-specific base fee specification.
+/// The Base chain-specific base fee specification.
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpBaseFeeInfo {
@@ -84,7 +95,7 @@ pub struct OpBaseFeeInfo {
 }
 
 impl OpBaseFeeInfo {
-    /// Extracts the OP chain base fee info by looking for the `optimism` key. It is intended to be
+    /// Extracts the Base chain base fee info by looking for the `optimism` key. It is intended to be
     /// parsed from a genesis file.
     pub fn extract_from(others: &OtherFields) -> Option<Self> {
         Self::try_from(others).ok()
@@ -114,7 +125,10 @@ mod tests {
           "bedrockBlock": 10,
           "regolithTime": 12,
           "canyonTime": 0,
-          "ecotoneTime": 0
+          "ecotoneTime": 0,
+          "base": {
+            "v1": 14
+          }
         }
         "#;
 
@@ -133,6 +147,7 @@ mod tests {
                 holocene_time: None,
                 isthmus_time: None,
                 jovian_time: None,
+                base: OpBaseHardforkInfo { v1: Some(14) },
             }
         );
     }
@@ -170,6 +185,9 @@ mod tests {
           "regolithTime": 12,
           "canyonTime": 0,
           "ecotoneTime": 0,
+          "base": {
+            "v1": 14
+          },
           "optimism": {
             "eip1559Denominator": 8,
             "eip1559DenominatorCanyon": 8
@@ -193,6 +211,7 @@ mod tests {
                     holocene_time: None,
                     isthmus_time: None,
                     jovian_time: None,
+                    base: OpBaseHardforkInfo { v1: Some(14) },
                 }),
                 base_fee_info: Some(OpBaseFeeInfo {
                     eip1559_elasticity: None,
@@ -217,6 +236,7 @@ mod tests {
                     holocene_time: None,
                     isthmus_time: None,
                     jovian_time: None,
+                    base: OpBaseHardforkInfo { v1: Some(14) },
                 }),
                 base_fee_info: Some(OpBaseFeeInfo {
                     eip1559_elasticity: None,
@@ -259,6 +279,7 @@ mod tests {
                     holocene_time: Some(0),
                     isthmus_time: Some(0),
                     jovian_time: Some(0),
+                    base: OpBaseHardforkInfo::default(),
                 }),
                 base_fee_info: None,
             }

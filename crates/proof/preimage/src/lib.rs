@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![doc(
     html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
     issue_tracker_base_url = "https://github.com/base/base/issues/"
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -12,6 +13,7 @@ extern crate alloc;
 extern crate tracing;
 
 pub mod errors;
+pub use errors::{WitnessOracleError, WitnessOracleResult};
 
 mod key;
 pub use key::{PreimageKey, PreimageKeyType};
@@ -24,8 +26,9 @@ pub use hint::{HintReader, HintWriter};
 
 mod traits;
 pub use traits::{
-    Channel, CommsClient, HintReaderServer, HintRouter, HintWriterClient, PreimageFetcher,
-    PreimageOracleClient, PreimageOracleServer, PreimageServerBackend,
+    Channel, CommsClient, FlushableCache, HintReaderServer, HintRouter, HintWriterClient,
+    PreimageFetcher, PreimageOracleClient, PreimageOracleServer, PreimageServerBackend,
+    WitnessOracle,
 };
 
 #[cfg(feature = "std")]

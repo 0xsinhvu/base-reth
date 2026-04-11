@@ -1,4 +1,4 @@
-//! The Optimism RPC API using `jsonrpsee`
+//! The Base RPC API using `jsonrpsee`
 
 use core::net::IpAddr;
 
@@ -20,7 +20,7 @@ use jsonrpsee::{
 
 use crate::{OutputResponse, SafeHeadResponse, health::HealthzResponse};
 
-/// Optimism specified rpc interface.
+/// Base rollup node RPC interface.
 ///
 /// https://docs.optimism.io/builders/node-operators/json-rpc
 /// https://github.com/ethereum-optimism/optimism/blob/8dd17a7b114a7c25505cd2e15ce4e3d0f7e3f7c1/op-node/node/api.go#L114
@@ -211,4 +211,43 @@ pub trait HealthzApi {
     /// Gets the health of the base-node.
     #[method(name = "healthz")]
     async fn healthz(&self) -> RpcResult<HealthzResponse>;
+}
+
+/// The conductor RPC API for HA sequencer cluster management.
+///
+/// Implemented by op-conductor nodes. See:
+/// <https://github.com/ethereum-optimism/optimism/blob/develop/op-conductor/rpc/api.go>
+#[cfg_attr(not(feature = "client"), rpc(server, namespace = "conductor"))]
+#[cfg_attr(feature = "client", rpc(server, client, namespace = "conductor"))]
+pub trait ConductorApi {
+    /// Returns whether this node is the current Raft leader.
+    #[method(name = "leader")]
+    async fn conductor_leader(&self) -> RpcResult<bool>;
+
+    /// Returns whether the conductor is active.
+    #[method(name = "active")]
+    async fn conductor_active(&self) -> RpcResult<bool>;
+
+    /// Commits an unsafe payload to the conductor.
+    #[method(name = "commitUnsafePayload")]
+    async fn conductor_commit_unsafe_payload(
+        &self,
+        payload: OpExecutionPayloadEnvelope,
+    ) -> RpcResult<()>;
+
+    /// Overrides the leader of the conductor.
+    #[method(name = "overrideLeader")]
+    async fn conductor_override_leader(&self) -> RpcResult<()>;
+
+    /// Transfers Raft leadership to any available peer.
+    #[method(name = "transferLeader")]
+    async fn conductor_transfer_leader(&self) -> RpcResult<()>;
+
+    /// Transfers Raft leadership to a specific peer identified by server ID and Raft address.
+    #[method(name = "transferLeaderToServer")]
+    async fn conductor_transfer_leader_to_server(
+        &self,
+        server_id: String,
+        raft_addr: String,
+    ) -> RpcResult<()>;
 }

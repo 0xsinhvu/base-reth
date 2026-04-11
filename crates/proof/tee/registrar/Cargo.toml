@@ -1,0 +1,64 @@
+[package]
+name = "base-proof-tee-registrar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Alloy
+alloy-sol-types.workspace = true
+alloy-primitives.workspace = true
+alloy-signer-local.workspace = true
+
+# AWS
+aws-sdk-ec2.workspace = true
+aws-sdk-elasticloadbalancingv2.workspace = true
+
+# Crypto
+k256.workspace = true
+rand.workspace = true
+
+# Contracts
+base-proof-contracts.workspace = true
+
+# Proving
+base-proof-tee-nitro-attestation-prover.workspace = true
+
+# Transaction management
+base-tx-manager.workspace = true
+
+# RPC
+jsonrpsee = { workspace = true, features = ["http-client", "server"] }
+base-proof-primitives = { workspace = true, features = ["rpc-client"] }
+
+# Async
+async-trait.workspace = true
+tokio-util.workspace = true
+tokio = { workspace = true, features = ["net", "time", "macros"] }
+
+# Error
+thiserror.workspace = true
+
+# Metrics
+metrics.workspace = true
+
+# Tracing
+tracing.workspace = true
+
+# Misc
+url.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+hex-literal.workspace = true
+alloy-consensus.workspace = true
+alloy-rpc-types-eth.workspace = true
+k256 = { workspace = true, features = ["ecdsa"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
+

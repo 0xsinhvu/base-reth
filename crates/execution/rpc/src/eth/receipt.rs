@@ -5,11 +5,11 @@ use std::fmt::Debug;
 use alloy_consensus::{BlockHeader, Receipt, ReceiptWithBloom, TxReceipt};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_rpc_types_eth::{Log, TransactionReceipt};
+use base_alloy_chains::BaseUpgrades;
 use base_alloy_consensus::{OpReceipt, OpTransaction};
+use base_alloy_flz::tx_estimated_size_fjord as estimate_tx_compressed_size;
 use base_alloy_rpc_types::{L1BlockInfo, OpTransactionReceipt, OpTransactionReceiptFields};
 use base_execution_evm::RethL1BlockInfo;
-use base_execution_forks::OpHardforks;
-use base_revm::estimate_tx_compressed_size;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_node_api::NodePrimitives;
 use reth_primitives_traits::SealedBlock;
@@ -46,8 +46,10 @@ impl<Provider> OpReceiptConverter<Provider> {
 impl<Provider, N> ReceiptConverter<N> for OpReceiptConverter<Provider>
 where
     N: NodePrimitives<SignedTx: OpTransaction, Receipt = OpReceipt>,
-    Provider:
-        BlockReader<Block = N::Block> + ChainSpecProvider<ChainSpec: OpHardforks> + Debug + 'static,
+    Provider: BlockReader<Block = N::Block>
+        + ChainSpecProvider<ChainSpec: BaseUpgrades>
+        + Debug
+        + 'static,
 {
     type RpcReceipt = OpTransactionReceipt;
     type Error = OpEthApiError;
@@ -169,7 +171,7 @@ impl OpReceiptFieldsBuilder {
     /// Applies [`L1BlockInfo`](base_revm::L1BlockInfo).
     pub fn l1_block_info<T: Encodable2718 + OpTransaction>(
         mut self,
-        chain_spec: &impl OpHardforks,
+        chain_spec: &impl BaseUpgrades,
         tx: &T,
         l1_block_info: &mut base_revm::L1BlockInfo,
     ) -> Result<Self, OpEthApiError> {
@@ -281,7 +283,7 @@ pub struct OpReceiptBuilder {
 impl OpReceiptBuilder {
     /// Returns a new builder.
     pub fn new<N>(
-        chain_spec: &impl OpHardforks,
+        chain_spec: &impl BaseUpgrades,
         input: ConvertReceiptInput<'_, N>,
         l1_block_info: &mut base_revm::L1BlockInfo,
     ) -> Result<Self, OpEthApiError>
@@ -341,12 +343,12 @@ impl OpReceiptBuilder {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_consensus::{Block, BlockBody, Eip658Value, TxEip7702, transaction::TransactionMeta};
     use alloy_eips::eip2718::Decodable2718;
     use alloy_primitives::{Address, Bytes, Signature, U256, hex};
+    use base_alloy_chains::BaseChainConfig;
     use base_alloy_consensus::OpTypedTransaction;
-    use base_alloy_hardforks::{BASE_MAINNET_ISTHMUS_TIMESTAMP, BASE_MAINNET_JOVIAN_TIMESTAMP};
     use base_execution_chainspec::BASE_MAINNET;
     use base_execution_primitives::{OpPrimitives, OpTransactionSigned};
     use reth_primitives_traits::Recovered;
@@ -414,7 +416,7 @@ mod test {
             base_execution_evm::extract_l1_info(&block.body).expect("should extract l1 info");
 
         // test
-        assert!(OpHardforks::is_fjord_active_at_timestamp(
+        assert!(BaseUpgrades::is_fjord_active_at_timestamp(
             &*BASE_MAINNET,
             BLOCK_124665056_TIMESTAMP
         ));
@@ -613,10 +615,11 @@ mod test {
 
         let op_hardforks = &*BASE_MAINNET;
 
-        let receipt = OpReceiptFieldsBuilder::new(BASE_MAINNET_JOVIAN_TIMESTAMP, u64::MAX)
-            .l1_block_info(&op_hardforks, &tx, &mut l1_block_info)
-            .expect("should parse revm l1 info")
-            .build();
+        let receipt =
+            OpReceiptFieldsBuilder::new(BaseChainConfig::mainnet().jovian_timestamp, u64::MAX)
+                .l1_block_info(&op_hardforks, &tx, &mut l1_block_info)
+                .expect("should parse revm l1 info")
+                .build();
 
         assert_eq!(receipt.l1_block_info.da_footprint_gas_scalar, Some(DA_FOOTPRINT_GAS_SCALAR));
     }
@@ -660,7 +663,7 @@ mod test {
                 gas_used: 100,
                 next_log_index: 0,
                 meta: TransactionMeta {
-                    timestamp: BASE_MAINNET_JOVIAN_TIMESTAMP,
+                    timestamp: BaseChainConfig::mainnet().jovian_timestamp,
                     ..Default::default()
                 },
             },
@@ -714,7 +717,7 @@ mod test {
                 gas_used: 100,
                 next_log_index: 0,
                 meta: TransactionMeta {
-                    timestamp: BASE_MAINNET_ISTHMUS_TIMESTAMP,
+                    timestamp: BaseChainConfig::mainnet().isthmus_timestamp,
                     ..Default::default()
                 },
             },

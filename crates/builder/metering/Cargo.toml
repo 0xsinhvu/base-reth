@@ -1,6 +1,6 @@
 [package]
 name = "base-builder-metering"
-description = "Resource metering backend for the OP Stack block builder"
+description = "Resource metering backend for the Base block builder"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,14 +12,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-base-builder-core.workspace = true
-base-bundles.workspace = true
-base-node-runner.workspace = true
-alloy-primitives.workspace = true
-dashmap.workspace = true
-concurrent-queue.workspace = true
-jsonrpsee.workspace = true
+moka = { workspace = true, features = ["sync"] }
 tracing.workspace = true
+jsonrpsee.workspace = true
+base-bundles.workspace = true
+alloy-primitives.workspace = true
+base-builder-core.workspace = true
+base-node-runner.workspace = true
 
 [dev-dependencies]
-alloy-primitives.workspace = true

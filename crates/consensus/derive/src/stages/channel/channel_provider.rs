@@ -157,7 +157,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::{sync::Arc, vec};
 
     use base_consensus_genesis::{HardForkConfig, RollupConfig};

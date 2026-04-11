@@ -21,16 +21,18 @@ mod l1block;
 pub use l1block::L1BlockInfo;
 
 mod precompiles;
-pub use precompiles::{OpPrecompiles, bls12_381, bn254_pair, fjord, granite, isthmus, jovian};
+pub use precompiles::{BasePrecompiles, bls12_381, bn254_pair};
 
 mod result;
 pub use result::OpHaltReason;
+
+mod rollup_config;
+pub use rollup_config::RollupConfigExt;
 
 mod spec;
 pub use spec::*;
 
 mod transaction;
-pub use base_alloy_flz::tx_estimated_size_fjord as estimate_tx_compressed_size;
 pub use transaction::{
     DEPOSIT_TRANSACTION_TYPE, DepositTransactionParts, OpBuildError, OpTransaction,
     OpTransactionBuilder, OpTransactionError, OpTxTr,

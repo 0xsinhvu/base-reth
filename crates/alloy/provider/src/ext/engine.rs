@@ -7,8 +7,8 @@ use alloy_rpc_types_engine::{
 };
 use alloy_transport::{Transport, TransportResult};
 use base_alloy_rpc_types_engine::{
-    OpExecutionPayloadEnvelopeV3, OpExecutionPayloadEnvelopeV4, OpExecutionPayloadV4,
-    OpPayloadAttributes,
+    OpExecutionPayloadEnvelopeV3, OpExecutionPayloadEnvelopeV4, OpExecutionPayloadEnvelopeV5,
+    OpExecutionPayloadV4, OpPayloadAttributes,
 };
 
 /// Extension trait for engine API RPC methods.
@@ -16,7 +16,7 @@ use base_alloy_rpc_types_engine::{
 /// Note:
 /// > The provider should use a JWT authentication layer.
 ///
-/// This follows the OP Stack specs:
+/// This follows the Base specs:
 /// <https://specs.optimism.io/protocol/exec-engine.html#engine-api>
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -137,6 +137,20 @@ pub trait OpEngineApi<N, T> {
         payload_id: PayloadId,
     ) -> TransportResult<OpExecutionPayloadEnvelopeV4>;
 
+    /// Returns the most recent version of the payload that is available in the corresponding
+    /// payload build process at the time of receiving this call.
+    ///
+    /// See also <https://github.com/ethereum/execution-apis/blob/main/src/engine/osaka.md#engine_getpayloadv5>
+    ///
+    /// OP modifications:
+    /// - the response type is [`OpExecutionPayloadEnvelopeV5`], which uses
+    ///   [`OpExecutionPayloadV4`](base_alloy_rpc_types_engine::OpExecutionPayloadV4) for the
+    ///   execution payload and otherwise follows the V5 envelope shape.
+    async fn get_payload_v5(
+        &self,
+        payload_id: PayloadId,
+    ) -> TransportResult<OpExecutionPayloadEnvelopeV5>;
+
     /// Returns the execution payload bodies by the given hash.
     ///
     /// See also <https://github.com/ethereum/execution-apis/blob/6452a6b194d7db269bf1dbd087a267251d3cc7f8/src/engine/shanghai.md#engine_getpayloadbodiesbyhashv1>
@@ -203,7 +217,7 @@ where
         payload: ExecutionPayloadV3,
         parent_beacon_block_root: B256,
     ) -> TransportResult<PayloadStatus> {
-        // Note: The `versioned_hashes` parameter is always an empty array for OP chains.
+        // Note: The `versioned_hashes` parameter is always an empty array for Base chains.
         let versioned_hashes: Vec<B256> = vec![];
 
         self.client()
@@ -217,7 +231,7 @@ where
         parent_beacon_block_root: B256,
     ) -> TransportResult<PayloadStatus> {
         // Note: The `versioned_hashes`, `execution_requests` parameters are always an empty array
-        // for OP chains.
+        // for Base chains.
         let versioned_hashes: Vec<B256> = vec![];
         let execution_requests: Vec<Bytes> = vec![];
 
@@ -268,6 +282,13 @@ where
         payload_id: PayloadId,
     ) -> TransportResult<OpExecutionPayloadEnvelopeV4> {
         self.client().request("engine_getPayloadV4", (payload_id,)).await
+    }
+
+    async fn get_payload_v5(
+        &self,
+        payload_id: PayloadId,
+    ) -> TransportResult<OpExecutionPayloadEnvelopeV5> {
+        self.client().request("engine_getPayloadV5", (payload_id,)).await
     }
 
     async fn get_payload_bodies_by_hash_v1(

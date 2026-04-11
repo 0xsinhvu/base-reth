@@ -7,17 +7,22 @@ L2_CHAIN_ID="${L2_CHAIN_ID:-84538453}"
 L1_CHAIN_ID="${L1_CHAIN_ID:-1337}"
 L2_DATA_DIR="${L2_DATA_DIR:-/data}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-/templates}"
+L2_BASE_V1_BLOCK="${L2_BASE_V1_BLOCK:-}"
 
-# Skip if L2 genesis already exists (for restarts)
-if [ -f "$OUTPUT_DIR/genesis.json" ] && [ -f "$OUTPUT_DIR/rollup.json" ]; then
-  echo "=== L2 Genesis already exists, skipping generation ==="
-  exit 0
+if [ -n "$L2_BASE_V1_BLOCK" ] && ! [[ "$L2_BASE_V1_BLOCK" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: L2_BASE_V1_BLOCK must be a non-negative integer when set, got: $L2_BASE_V1_BLOCK"
+  exit 1
 fi
 
 echo "=== L2 Genesis Generator (Live Deployment) ==="
 echo "L1 RPC URL: $L1_RPC_URL"
 echo "L1 Chain ID: $L1_CHAIN_ID"
 echo "L2 Chain ID: $L2_CHAIN_ID"
+if [ -n "$L2_BASE_V1_BLOCK" ]; then
+  echo "Base V1 activation block: $L2_BASE_V1_BLOCK"
+else
+  echo "Base V1 activation block: <unset>"
+fi
 echo "Output directory: $OUTPUT_DIR"
 
 # Wait for L1 RPC to be available
@@ -77,9 +82,9 @@ echo "Configuring intent.toml for devnet..."
 L2_CHAIN_ID_HEX=$(printf "0x%064x" $L2_CHAIN_ID)
 
 # Export variables for envsubst
-export L1_CHAIN_ID L2_CHAIN_ID_HEX DEPLOYER_ADDR SEQUENCER_ADDR BATCHER_ADDR PROPOSER_ADDR CHALLENGER_ADDR
+export L1_CHAIN_ID L2_CHAIN_ID_HEX DEPLOYER_ADDR SEQUENCER_ADDR BATCHER_ADDR PROPOSER_ADDR CHALLENGER_ADDR SEQ1_P2P_KEY SEQ2_P2P_KEY
 
-envsubst < "$TEMPLATE_DIR/l2-intent.toml.template" > "$INTENT_FILE"
+envsubst <"$TEMPLATE_DIR/l2-intent.toml.template" >"$INTENT_FILE"
 
 echo "Intent configured:"
 cat "$INTENT_FILE"
@@ -114,21 +119,63 @@ echo "Extracting L2 genesis..."
 op-deployer inspect genesis \
   --workdir "$OP_DEPLOYER_WORKDIR" \
   "$L2_CHAIN_ID" \
-  > "$OUTPUT_DIR/genesis.json"
+  >"$OUTPUT_DIR/genesis.json"
 echo "L2 genesis written to $OUTPUT_DIR/genesis.json"
 
 echo "Extracting rollup config..."
 op-deployer inspect rollup \
   --workdir "$OP_DEPLOYER_WORKDIR" \
   "$L2_CHAIN_ID" \
-  > "$OUTPUT_DIR/rollup.json"
+  >"$OUTPUT_DIR/rollup.json"
 echo "Rollup config written to $OUTPUT_DIR/rollup.json"
+
+L2_BLOCK_TIME=$(jq -re '.block_time' "$OUTPUT_DIR/rollup.json")
+L2_GENESIS_TIME=$(jq -re '.genesis.l2_time' "$OUTPUT_DIR/rollup.json")
+if [ -n "$L2_BASE_V1_BLOCK" ]; then
+  L2_BASE_V1_TIME=$((L2_GENESIS_TIME + L2_BLOCK_TIME * L2_BASE_V1_BLOCK))
+
+  echo ""
+  echo "=== Configuring Base V1 Activation ==="
+  echo "L2 genesis time: $L2_GENESIS_TIME"
+  echo "L2 block time: $L2_BLOCK_TIME"
+  echo "Base V1 activation block: $L2_BASE_V1_BLOCK"
+  echo "Derived Base V1 activation timestamp: $L2_BASE_V1_TIME"
+
+  TMP_ROLLUP=$(mktemp)
+  jq \
+    --argjson base_v1_time "$L2_BASE_V1_TIME" \
+    '.base = ((.base // {}) + {v1: $base_v1_time})' \
+    "$OUTPUT_DIR/rollup.json" \
+    >"$TMP_ROLLUP"
+  mv "$TMP_ROLLUP" "$OUTPUT_DIR/rollup.json"
+
+  TMP_GENESIS=$(mktemp)
+  jq \
+    --argjson base_v1_time "$L2_BASE_V1_TIME" \
+    '.config.osakaTime = $base_v1_time
+    | .config.base = ((.config.base // {}) + {v1: $base_v1_time})' \
+    "$OUTPUT_DIR/genesis.json" \
+    >"$TMP_GENESIS"
+  mv "$TMP_GENESIS" "$OUTPUT_DIR/genesis.json"
+
+  echo "Patched Base V1 activation into rollup and genesis configs"
+else
+  echo ""
+  echo "=== Configuring Base V1 Activation ==="
+  echo "L2 genesis time: $L2_GENESIS_TIME"
+  echo "L2 block time: $L2_BLOCK_TIME"
+  echo "Base V1 activation block is unset; leaving base.v1 and osakaTime unchanged"
+fi
+
+echo "Writing rollup-conductor.json (base fields stripped for op-conductor compatibility)..."
+jq 'del(.base)' "$OUTPUT_DIR/rollup.json" >"$OUTPUT_DIR/rollup-conductor.json"
+echo "rollup-conductor.json written to $OUTPUT_DIR/rollup-conductor.json"
 
 echo "Extracting L1 addresses..."
 op-deployer inspect l1 \
   --workdir "$OP_DEPLOYER_WORKDIR" \
   "$L2_CHAIN_ID" \
-  > "$OUTPUT_DIR/l1-addresses.json"
+  >"$OUTPUT_DIR/l1-addresses.json"
 echo "L1 addresses written to $OUTPUT_DIR/l1-addresses.json"
 
 # Verify the rollup.json has the correct L1 genesis hash
@@ -151,11 +198,15 @@ fi
 echo ""
 echo "=== Generating P2P Keys ==="
 
-echo "$BUILDER_P2P_KEY" > "$OUTPUT_DIR/builder-p2p-key.txt"
-echo "$BUILDER_ENODE_ID" > "$OUTPUT_DIR/builder-enode-id.txt"
+echo "$BUILDER_P2P_KEY" >"$OUTPUT_DIR/builder-p2p-key.txt"
+echo "$BUILDER_ENODE_ID" >"$OUTPUT_DIR/builder-enode-id.txt"
+echo "$SEQ1_P2P_KEY" >"$OUTPUT_DIR/sequencer-1-p2p-key.txt"
+echo "$SEQ2_P2P_KEY" >"$OUTPUT_DIR/sequencer-2-p2p-key.txt"
 
 echo "Builder P2P key written to $OUTPUT_DIR/builder-p2p-key.txt"
 echo "Builder enode ID: $BUILDER_ENODE_ID"
+echo "Sequencer-1 P2P key written to $OUTPUT_DIR/sequencer-1-p2p-key.txt"
+echo "Sequencer-2 P2P key written to $OUTPUT_DIR/sequencer-2-p2p-key.txt"
 
 # Cleanup
 rm -rf "$OP_DEPLOYER_WORKDIR"
@@ -166,6 +217,7 @@ echo ""
 echo "Files generated:"
 echo "  L2 genesis: $OUTPUT_DIR/genesis.json"
 echo "  Rollup config: $OUTPUT_DIR/rollup.json"
+echo "  Rollup config (conductor): $OUTPUT_DIR/rollup-conductor.json"
 echo "  L1 addresses: $OUTPUT_DIR/l1-addresses.json"
 echo "  Builder P2P key: $OUTPUT_DIR/builder-p2p-key.txt"
 echo ""

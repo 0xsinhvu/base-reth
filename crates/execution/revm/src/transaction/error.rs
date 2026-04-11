@@ -6,7 +6,7 @@ use revm::context_interface::{
     transaction::TransactionError,
 };
 
-/// Optimism transaction validation error.
+/// Base transaction validation error.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OpTransactionError {
@@ -21,7 +21,7 @@ pub enum OpTransactionError {
     ///
     /// In addition, this error is internal, and bubbles up into an [`OpHaltReason::FailedDeposit`][crate::OpHaltReason::FailedDeposit] error
     /// in the `revm` handler for the consumer to easily handle. This is due to a state transition
-    /// rule on OP Stack chains where, if for any reason a deposit transaction fails, the transaction
+    /// rule on Base where, if for any reason a deposit transaction fails, the transaction
     /// must still be included in the block, the sender nonce is bumped, the `mint` value persists, and
     /// special gas accounting rules are applied. Normally on L1, [`EVMError::Transaction`] errors
     /// are cause for non-inclusion, so a special [`OpHaltReason`][crate::OpHaltReason] variant was introduced to handle this
@@ -36,7 +36,7 @@ pub enum OpTransactionError {
     ///
     /// In addition, this error is internal, and bubbles up into an [`OpHaltReason::FailedDeposit`][crate::OpHaltReason::FailedDeposit] error
     /// in the `revm` handler for the consumer to easily handle. This is due to a state transition
-    /// rule on OP Stack chains where, if for any reason a deposit transaction fails, the transaction
+    /// rule on Base where, if for any reason a deposit transaction fails, the transaction
     /// must still be included in the block, the sender nonce is bumped, the `mint` value persists, and
     /// special gas accounting rules are applied. Normally on L1, [`EVMError::Transaction`] errors
     /// are cause for non-inclusion, so a special [`OpHaltReason`][crate::OpHaltReason] variant was introduced to handle this
@@ -44,7 +44,7 @@ pub enum OpTransactionError {
     HaltedDepositPostRegolith,
     /// Missing enveloped transaction bytes for non-deposit transaction.
     ///
-    /// Non-deposit transactions on Optimism must have `enveloped_tx` field set
+    /// Non-deposit transactions on Base must have `enveloped_tx` field set
     /// to properly calculate L1 costs.
     MissingEnvelopedTx,
 }
@@ -86,7 +86,7 @@ impl<DBError> From<OpTransactionError> for EVMError<DBError, OpTransactionError>
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::string::ToString;
 
     use super::*;

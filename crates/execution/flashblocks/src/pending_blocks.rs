@@ -1,4 +1,4 @@
-use std::{collections::HashMap as StdHashMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use alloy_consensus::{Header, Sealed};
 use alloy_eips::BlockNumberOrTag;
@@ -42,8 +42,10 @@ pub struct PendingBlocksBuilder {
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
     state_overrides: Option<StateOverride>,
-    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
     transaction_results: HashMap<B256, ExecutionResult<OpHaltReason>>,
+    execution_times: HashMap<B256, u128>,
+    state_root_times: HashMap<B256, u128>,
+
     bundle_state: BundleState,
 }
 
@@ -67,8 +69,9 @@ impl PendingBlocksBuilder {
             transaction_state: HashMap::new(),
             transaction_senders: HashMap::new(),
             transaction_results: HashMap::new(),
+            execution_times: HashMap::new(),
+            state_root_times: HashMap::new(),
             state_overrides: None,
-            historical_state_overrides: StdHashMap::new(),
             bundle_state: BundleState::default(),
         }
     }
@@ -87,27 +90,31 @@ impl PendingBlocksBuilder {
         self
     }
 
+    /// Stores a transaction in the builder.
     #[inline]
-    pub(crate) fn with_transaction(&mut self, transaction: Transaction) -> &Self {
+    pub fn with_transaction(&mut self, transaction: Transaction) -> &Self {
         self.transactions_by_hash.insert(transaction.tx_hash(), transaction.clone());
         self.transactions.push(transaction);
         self
     }
 
+    /// Stores the EVM state changes produced by a transaction.
     #[inline]
-    pub(crate) fn with_transaction_state(&mut self, hash: B256, state: EvmState) -> &Self {
+    pub fn with_transaction_state(&mut self, hash: B256, state: EvmState) -> &Self {
         self.transaction_state.insert(hash, state);
         self
     }
 
+    /// Records the sender of a transaction.
     #[inline]
-    pub(crate) fn with_transaction_sender(&mut self, hash: B256, sender: Address) -> &Self {
+    pub fn with_transaction_sender(&mut self, hash: B256, sender: Address) -> &Self {
         self.transaction_senders.insert(hash, sender);
         self
     }
 
+    /// Increments the pending nonce for an account.
     #[inline]
-    pub(crate) fn increment_nonce(&mut self, sender: Address) -> &Self {
+    pub fn increment_nonce(&mut self, sender: Address) -> &Self {
         let zero = U256::from(0);
         let current_count = self.transaction_count.get(&sender).unwrap_or(&zero);
 
@@ -115,38 +122,37 @@ impl PendingBlocksBuilder {
         self
     }
 
+    /// Stores the receipt for a transaction.
     #[inline]
-    pub(crate) fn with_receipt(&mut self, hash: B256, receipt: OpTransactionReceipt) -> &Self {
+    pub fn with_receipt(&mut self, hash: B256, receipt: OpTransactionReceipt) -> &Self {
         self.transaction_receipts.insert(hash, receipt);
         self
     }
 
+    /// Records the balance of an account after execution.
     #[inline]
-    pub(crate) fn with_account_balance(&mut self, address: Address, balance: U256) -> &Self {
+    pub fn with_account_balance(&mut self, address: Address, balance: U256) -> &Self {
         self.account_balances.insert(address, balance);
         self
     }
 
+    /// Sets state overrides for the pending blocks.
     #[inline]
-    pub(crate) fn with_state_overrides(&mut self, state_overrides: StateOverride) -> &Self {
+    pub fn with_state_overrides(&mut self, state_overrides: StateOverride) -> &Self {
         self.state_overrides = Some(state_overrides);
         self
     }
 
+    /// Sets the accumulated bundle state.
     #[inline]
-    pub(crate) fn with_historical_state_overrides(&mut self, historical_state_overrides: StdHashMap<(u64, u64), StateOverride>) -> &Self {
-        self.historical_state_overrides.extend(historical_state_overrides);
-        self
-    }
-
-    #[inline]
-    pub(crate) fn with_bundle_state(&mut self, bundle_state: BundleState) -> &Self {
+    pub fn with_bundle_state(&mut self, bundle_state: BundleState) -> &Self {
         self.bundle_state = bundle_state;
         self
     }
 
+    /// Stores the execution result for a transaction.
     #[inline]
-    pub(crate) fn with_transaction_result(
+    pub fn with_transaction_result(
         &mut self,
         hash: B256,
         result: ExecutionResult<OpHaltReason>,
@@ -155,47 +161,27 @@ impl PendingBlocksBuilder {
         self
     }
 
+    /// Stores per-transaction EVM execution time.
+    #[inline]
+    pub fn with_execution_time(&mut self, hash: B256, time_us: u128) -> &Self {
+        self.execution_times.insert(hash, time_us);
+        self
+    }
+
+    /// Stores per-transaction state root simulation time.
+    #[inline]
+    pub fn with_state_root_time(&mut self, hash: B256, time_us: u128) -> &Self {
+        self.state_root_times.insert(hash, time_us);
+        self
+    }
+
     /// Builds the pending blocks.
-    pub fn build(self, tracker: Option<std::time::Instant>) -> Result<PendingBlocks, StateProcessorError> {
+    pub fn build(self) -> Result<PendingBlocks, StateProcessorError> {
         let earliest_header = self.headers.first().cloned().ok_or(BuildError::MissingHeaders)?;
         let latest_header = self.headers.last().cloned().ok_or(BuildError::MissingHeaders)?;
 
         let latest_flashblock_index =
             self.flashblocks.last().map(|fb| fb.index).ok_or(BuildError::NoFlashblocks)?;
-
-        let mut state_overrides_cutoff = self.state_overrides.clone().unwrap_or_default();
-        state_overrides_cutoff.retain(|_, acc| {
-            acc.state_diff.as_ref().map_or(false, |d| !d.is_empty())
-        });
-        for acc in state_overrides_cutoff.values_mut() {
-            acc.balance = None;
-            acc.nonce = None;
-            acc.code = None;
-        }
-
-        let mut merged_historical_state_overrides = self.historical_state_overrides;
-        merged_historical_state_overrides.insert(
-            (latest_header.number, latest_flashblock_index),
-            state_overrides_cutoff
-        );
-
-        // Keep only the 5 latest (by block number, then block index)
-        if merged_historical_state_overrides.len() > 5 {
-            let mut keys: Vec<_> = merged_historical_state_overrides.keys().copied().collect();
-            keys.sort_by(|a, b| b.cmp(a)); // descending: latest first
-            for key in keys.into_iter().skip(5) {
-                merged_historical_state_overrides.remove(&key);
-            }
-        }
-
-        if let Some(tracker) = tracker {
-            info!(
-                block = latest_header.number,
-                index = latest_flashblock_index,
-                took = ?tracker.elapsed(),
-                "built pending state"
-            );
-        }
 
         Ok(PendingBlocks {
             earliest_header,
@@ -210,9 +196,10 @@ impl PendingBlocksBuilder {
             transaction_state: self.transaction_state,
             transaction_senders: self.transaction_senders,
             state_overrides: self.state_overrides,
-            historical_state_overrides: merged_historical_state_overrides,
             bundle_state: self.bundle_state,
             transaction_results: self.transaction_results,
+            execution_times: self.execution_times,
+            state_root_times: self.state_root_times,
         })
     }
 }
@@ -233,8 +220,10 @@ pub struct PendingBlocks {
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
     state_overrides: Option<StateOverride>,
-    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
     transaction_results: HashMap<B256, ExecutionResult<OpHaltReason>>,
+    execution_times: HashMap<B256, u128>,
+    state_root_times: HashMap<B256, u128>,
+
     bundle_state: BundleState,
 }
 
@@ -351,6 +340,16 @@ impl PendingBlocks {
         self.transaction_results.get(tx_hash)
     }
 
+    /// Returns the per-transaction EVM execution time in microseconds.
+    pub fn get_execution_time(&self, tx_hash: &B256) -> Option<u128> {
+        self.execution_times.get(tx_hash).copied()
+    }
+
+    /// Returns the per-transaction state root simulation time in microseconds.
+    pub fn get_state_root_time(&self, tx_hash: &B256) -> Option<u128> {
+        self.state_root_times.get(tx_hash).copied()
+    }
+
     /// Returns the receipt and state for a transaction.
     pub fn get_op_tx_result(&self, tx_hash: &B256) -> Option<OpTxResult<OpHaltReason, OpTxType>> {
         let (((result, state), tx), sender) = self
@@ -359,6 +358,8 @@ impl PendingBlocks {
             .zip(self.get_transaction_by_hash(*tx_hash))
             .zip(self.get_transaction_sender(tx_hash))?;
 
+        // Use blob_gas_used from receipt (DA footprint for Jovian) instead of
+        // hardcoding 0, so that CachedExecutor correctly accumulates da_footprint_used.
         let blob_gas_used =
             self.get_receipt(*tx_hash).and_then(|r| r.inner.blob_gas_used).unwrap_or_default();
 
@@ -399,20 +400,16 @@ impl PendingBlocks {
         self.state_overrides.clone()
     }
 
-    /// Returns the nearest state overrides for the pending state.
-    pub fn get_historical_state_overrides(&self) -> StdHashMap<(u64, u64), StateOverride> {
-        self.historical_state_overrides.clone()
-    }
-
     /// Returns logs matching the filter from pending state.
     pub fn get_pending_logs(&self, filter: &Filter) -> Vec<Log> {
         let mut logs = Vec::new();
 
-        // Iterate through all transaction receipts in pending state
-        for receipt in self.transaction_receipts.values() {
-            for log in receipt.inner.logs() {
-                if filter.matches(&log.inner) {
-                    logs.push(log.clone());
+        for tx in &self.transactions {
+            if let Some(receipt) = self.transaction_receipts.get(&tx.tx_hash()) {
+                for log in receipt.inner.logs() {
+                    if filter.matches(&log.inner) {
+                        logs.push(log.clone());
+                    }
                 }
             }
         }
@@ -549,11 +546,6 @@ impl PendingBlocksAPI for Guard<Option<Arc<PendingBlocks>>> {
         self.as_ref().map(|pb| pb.get_state_overrides()).unwrap_or_default()
     }
 
-    fn get_historical_state_overrides_at(&self, block_number: u64, block_index: u64) -> Option<StateOverride> {
-        let historical_state_overrides = self.as_ref().map(|pb| pb.get_historical_state_overrides()).unwrap_or_default();
-        historical_state_overrides.get(&(block_number, block_index)).cloned()
-    }
-
     fn get_pending_logs(&self, filter: &Filter) -> Vec<Log> {
         self.as_ref().map(|pb| pb.get_pending_logs(filter)).unwrap_or_default()
     }
@@ -561,8 +553,12 @@ impl PendingBlocksAPI for Guard<Option<Arc<PendingBlocks>>> {
 
 #[cfg(test)]
 mod tests {
-    use alloy_consensus::{Header, Receipt, ReceiptWithBloom, Sealed, transaction::Recovered};
-    use alloy_primitives::{Address, B256, Bloom, Bytes, Signature, U256};
+    use alloy_consensus::{
+        Header, Receipt, ReceiptWithBloom, Sealed, Signed, transaction::Recovered,
+    };
+    use alloy_primitives::{
+        Address, B256, Bloom, Bytes, Log as PrimitiveLog, LogData, Signature, TxKind, U256,
+    };
     use alloy_provider::network::TransactionResponse;
     use alloy_rpc_types_engine::PayloadId;
     use base_alloy_consensus::{OpReceipt, OpTxEnvelope, TxDeposit};
@@ -629,6 +625,33 @@ mod tests {
         }
     }
 
+    /// Creates a [`Transaction`] whose `tx_hash()` equals `hash`.
+    fn test_transaction_with_hash(hash: B256) -> Transaction {
+        let legacy = alloy_consensus::TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 1_000_000_000,
+            gas_limit: 21_000,
+            to: TxKind::Call(Address::ZERO),
+            value: U256::ZERO,
+            input: Bytes::new(),
+        };
+        let envelope =
+            OpTxEnvelope::Legacy(Signed::new_unchecked(legacy, Signature::test_signature(), hash));
+        let recovered = Recovered::new_unchecked(envelope, Address::ZERO);
+        Transaction {
+            inner: alloy_rpc_types_eth::Transaction {
+                inner: recovered,
+                block_hash: Some(B256::ZERO),
+                block_number: Some(1),
+                transaction_index: Some(0),
+                effective_gas_price: Some(1_000_000_000),
+            },
+            deposit_nonce: None,
+            deposit_receipt_version: None,
+        }
+    }
+
     fn test_deposit_transaction() -> Transaction {
         let deposit = TxDeposit {
             source_hash: B256::repeat_byte(0xdd),
@@ -683,6 +706,48 @@ mod tests {
         }
     }
 
+    /// Creates an [`OpTransactionReceipt`] with a single log emitted from `log_address`.
+    fn test_receipt_with_log(tx_hash: B256, log_address: Address) -> OpTransactionReceipt {
+        let log = Log {
+            inner: PrimitiveLog {
+                address: log_address,
+                data: LogData::new_unchecked(vec![], Bytes::new()),
+            },
+            block_hash: Some(B256::ZERO),
+            block_number: Some(1),
+            block_timestamp: None,
+            transaction_hash: Some(tx_hash),
+            transaction_index: Some(0),
+            log_index: Some(0),
+            removed: false,
+        };
+
+        OpTransactionReceipt {
+            inner: alloy_rpc_types_eth::TransactionReceipt {
+                inner: ReceiptWithBloom {
+                    receipt: OpReceipt::Legacy(Receipt {
+                        status: alloy_consensus::Eip658Value::Eip658(true),
+                        cumulative_gas_used: 21_000,
+                        logs: vec![log],
+                    }),
+                    logs_bloom: Bloom::default(),
+                },
+                transaction_hash: tx_hash,
+                transaction_index: Some(0),
+                block_hash: Some(B256::ZERO),
+                block_number: Some(1),
+                gas_used: 21_000,
+                effective_gas_price: 1_000_000_000,
+                blob_gas_used: None,
+                blob_gas_price: None,
+                from: Address::ZERO,
+                to: None,
+                contract_address: None,
+            },
+            l1_block_info: Default::default(),
+        }
+    }
+
     fn test_execution_result() -> ExecutionResult<OpHaltReason> {
         ExecutionResult::Success {
             reason: revm::context::result::SuccessReason::Stop,
@@ -703,7 +768,23 @@ mod tests {
         builder.with_transaction_state(tx_hash, Default::default());
         builder.with_transaction_result(tx_hash, test_execution_result());
         builder.with_receipt(tx_hash, test_receipt(tx_hash, blob_gas_used));
-        (tx_hash, builder.build(None).expect("should build pending blocks"))
+        (tx_hash, builder.build().expect("should build pending blocks"))
+    }
+
+    /// Builds a [`PendingBlocks`] with the supplied (hash, `log_address`) pairs
+    /// inserted in the given order.
+    fn build_pending_blocks_with_logs(entries: &[(B256, Address)]) -> PendingBlocks {
+        let header = Sealed::new_unchecked(Header::default(), B256::ZERO);
+        let mut builder = PendingBlocksBuilder::new();
+        builder.with_flashblocks([test_flashblock()]);
+        builder.with_header(header);
+
+        for &(hash, addr) in entries {
+            builder.with_transaction(test_transaction_with_hash(hash));
+            builder.with_receipt(hash, test_receipt_with_log(hash, addr));
+        }
+
+        builder.build().expect("build should succeed")
     }
 
     #[test]
@@ -755,10 +836,32 @@ mod tests {
         builder.with_transaction_state(tx_hash, Default::default());
         builder.with_transaction_result(tx_hash, test_execution_result());
         // Intentionally skip with_receipt to test the no-receipt fallback path
-        let pending_blocks = builder.build(None).expect("should build pending blocks");
+        let pending_blocks = builder.build().expect("should build pending blocks");
 
         let result = pending_blocks.get_op_tx_result(&tx_hash).expect("should return tx result");
 
         assert_eq!(result.inner.blob_gas_used, 0);
+    }
+
+    #[test]
+    fn get_pending_logs_returns_logs_in_transaction_order() {
+        let hash_a = B256::with_last_byte(0xAA);
+        let hash_b = B256::with_last_byte(0xBB);
+        let hash_c = B256::with_last_byte(0xCC);
+
+        let addr_a = Address::with_last_byte(0x0A);
+        let addr_b = Address::with_last_byte(0x0B);
+        let addr_c = Address::with_last_byte(0x0C);
+
+        let pending =
+            build_pending_blocks_with_logs(&[(hash_a, addr_a), (hash_b, addr_b), (hash_c, addr_c)]);
+
+        let filter = Filter::default();
+        let logs = pending.get_pending_logs(&filter);
+
+        assert_eq!(logs.len(), 3, "should return one log per transaction");
+        assert_eq!(logs[0].address(), addr_a);
+        assert_eq!(logs[1].address(), addr_b);
+        assert_eq!(logs[2].address(), addr_c);
     }
 }

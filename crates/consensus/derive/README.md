@@ -2,9 +2,17 @@
 
 <a href="https://crates.io/crates/base-consensus-derive"><img src="https://img.shields.io/crates/v/base-consensus-derive.svg?label=base-consensus-derive&labelColor=2a2f35" alt="base-consensus-derive"></a>
 
-A `no_std` compatible implementation of the OP Stack's [derivation pipeline][derive].
+A `no_std` compatible implementation of Base's [derivation pipeline][derive].
 
 [derive]: https://specs.optimism.io/protocol/derivation.html#l2-chain-derivation-specification
+
+## Overview
+
+Implements the full L2 chain derivation pipeline as specified by the Base protocol. The
+`DerivationPipeline` steps through L1 data to produce `OpPayloadAttributes` for each L2 block.
+`EthereumDataSource` fetches batch data from calldata or blobs, `StatefulAttributesBuilder`
+constructs payload attributes with deposits and sequencer configuration, and `PipelineBuilder`
+wires all stages together. The crate is `no_std` compatible for use in fault proof VMs.
 
 ## Usage
 
@@ -60,3 +68,7 @@ Some features include the following.
 By default, `base-consensus-derive` enables the `serde` feature.
 
 [ff]: https://github.com/base/base/blob/main/crates/consensus/derive/Cargo.toml
+
+## License
+
+Licensed under the [MIT License](https://github.com/base/base/blob/main/LICENSE).

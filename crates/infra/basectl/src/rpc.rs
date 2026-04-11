@@ -1,18 +1,22 @@
 use std::{sync::Arc, time::Duration};
 
-use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::Address;
-use alloy_provider::{Provider, ProviderBuilder};
-use alloy_rpc_types_eth::{BlockNumberOrTag, TransactionTrait};
+use alloy_consensus::{Transaction, transaction::SignerRecoverable};
+use alloy_eips::eip2718::{Decodable2718, Encodable2718};
+use alloy_primitives::{Address, B256, Bytes};
+use alloy_provider::{Provider, ProviderBuilder, network::TransactionResponse};
+use alloy_rpc_types_eth::BlockNumberOrTag;
 use anyhow::Result;
+use base_alloy_consensus::OpTxEnvelope;
 use base_alloy_flashblocks::Flashblock;
 use base_alloy_network::Base;
+use base_consensus_rpc::{ConductorApiClient, OpP2PApiClient, RollupNodeApiClient};
 use futures::{StreamExt, stream};
-use tokio::sync::mpsc;
+use jsonrpsee::http_client::HttpClientBuilder;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::connect_async;
 use tracing::warn;
 
-use crate::tui::Toast;
+use crate::{config::ConductorNodeConfig, tui::Toast};
 
 const CONCURRENT_BLOCK_FETCHES: usize = 16;
 const WS_RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -79,8 +83,17 @@ pub(crate) async fn run_safe_head_poller(
     }
 }
 
+/// Connects to the URL in `url_rx`, forwarding decoded flashblocks to `tx`.
+///
+/// Reconnects automatically on disconnection or error (exponential backoff).
+/// If `url_rx` emits a new value while connected, the current connection is
+/// dropped immediately and a fresh connection is opened to the new URL with
+/// no backoff delay.  This is the mechanism used to follow conductor leader
+/// changes: when a new Raft leader is elected, the caller pushes the new
+/// leader's flashblocks endpoint into the watch channel and the loop here
+/// switches over without waiting for the old socket to time out.
 async fn run_flashblock_ws_inner<T: Send + 'static>(
-    url: &str,
+    url_rx: &mut watch::Receiver<String>,
     tx: &mpsc::Sender<T>,
     toast_tx: &mpsc::Sender<Toast>,
     map_fb: impl Fn(Flashblock) -> T,
@@ -88,53 +101,93 @@ async fn run_flashblock_ws_inner<T: Send + 'static>(
     let mut delay = WS_RECONNECT_INITIAL_DELAY;
 
     loop {
-        match connect_async(url).await {
-            Ok((ws_stream, _)) => {
-                delay = WS_RECONNECT_INITIAL_DELAY;
-                let (_, mut read) = ws_stream.split();
+        let url = url_rx.borrow_and_update().clone();
 
-                while let Some(msg) = read.next().await {
-                    let msg = match msg {
-                        Ok(m) => m,
-                        Err(e) => {
-                            warn!(error = %e, "Flashblock WebSocket connection error");
-                            let _ = toast_tx.try_send(Toast::warning("WebSocket disconnected"));
-                            break;
+        // Wrap connect_async in a select so a second leader change that
+        // arrives while a TCP handshake is already in progress (e.g. rapid
+        // successive transfers, or non-localhost endpoints that stall rather
+        // than immediately refuse) is acted on without waiting for the
+        // handshake to resolve.
+        tokio::select! {
+            result = connect_async(url.as_str()) => {
+                match result {
+                    Ok((ws_stream, _)) => {
+                        delay = WS_RECONNECT_INITIAL_DELAY;
+                        let (_, mut read) = ws_stream.split();
+                        let mut leader_changed = false;
+
+                        loop {
+                            tokio::select! {
+                                msg_opt = read.next() => {
+                                    let msg = match msg_opt {
+                                        Some(Ok(m)) => m,
+                                        Some(Err(e)) => {
+                                            warn!(error = %e, "Flashblock WebSocket connection error");
+                                            let _ = toast_tx.try_send(Toast::warning("WebSocket disconnected"));
+                                            break;
+                                        }
+                                        None => break,
+                                    };
+                                    if !msg.is_binary() && !msg.is_text() {
+                                        continue;
+                                    }
+                                    let fb = match Flashblock::try_decode_message(msg.into_data()) {
+                                        Ok(fb) => fb,
+                                        Err(_) => continue,
+                                    };
+                                    if tx.send(map_fb(fb)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                Ok(()) = url_rx.changed() => {
+                                    leader_changed = true;
+                                    break;
+                                }
+                            }
                         }
-                    };
-                    if !msg.is_binary() && !msg.is_text() {
-                        continue;
+
+                        if leader_changed {
+                            // Skip backoff: reconnect immediately to the new leader.
+                            delay = WS_RECONNECT_INITIAL_DELAY;
+                            continue;
+                        }
                     }
-                    let fb = match Flashblock::try_decode_message(msg.into_data()) {
-                        Ok(fb) => fb,
-                        Err(_) => continue,
-                    };
-                    if tx.send(map_fb(fb)).await.is_err() {
-                        return;
+                    Err(e) => {
+                        warn!(error = %e, url = %url, "Failed to connect to flashblock WebSocket");
+                        let _ = toast_tx.try_send(Toast::warning(format!(
+                            "WebSocket connection failed, retrying in {}s",
+                            delay.as_secs()
+                        )));
                     }
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "Failed to connect to flashblock WebSocket");
-                let _ = toast_tx.try_send(Toast::warning(format!(
-                    "WebSocket connection failed, retrying in {}s",
-                    delay.as_secs()
-                )));
+            Ok(()) = url_rx.changed() => {
+                // URL changed while connecting; abandon this attempt and
+                // reconnect to the new leader immediately, without backoff.
+                delay = WS_RECONNECT_INITIAL_DELAY;
+                continue;
             }
         }
 
-        tokio::time::sleep(delay).await;
-        delay = (delay * 2).min(WS_RECONNECT_MAX_DELAY);
+        // Exponential backoff, but skip the remainder if the URL changes.
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {
+                delay = (delay * 2).min(WS_RECONNECT_MAX_DELAY);
+            }
+            Ok(()) = url_rx.changed() => {
+                delay = WS_RECONNECT_INITIAL_DELAY;
+            }
+        }
     }
 }
 
 /// Subscribes to flashblocks via WebSocket and forwards raw flashblocks.
 pub(crate) async fn run_flashblock_ws(
-    url: String,
+    mut url_rx: watch::Receiver<String>,
     tx: mpsc::Sender<Flashblock>,
     toast_tx: mpsc::Sender<Toast>,
 ) {
-    run_flashblock_ws_inner(&url, &tx, &toast_tx, |fb| fb).await;
+    run_flashblock_ws_inner(&mut url_rx, &tx, &toast_tx, |fb| fb).await;
 }
 
 /// A flashblock paired with its local receive timestamp.
@@ -148,17 +201,22 @@ pub(crate) struct TimestampedFlashblock {
 
 /// Subscribes to flashblocks via WebSocket and forwards timestamped flashblocks.
 pub(crate) async fn run_flashblock_ws_timestamped(
-    url: String,
+    mut url_rx: watch::Receiver<String>,
     tx: mpsc::Sender<TimestampedFlashblock>,
     toast_tx: mpsc::Sender<Toast>,
 ) {
-    run_flashblock_ws_inner(&url, &tx, &toast_tx, |fb| TimestampedFlashblock {
+    run_flashblock_ws_inner(&mut url_rx, &tx, &toast_tx, |fb| TimestampedFlashblock {
         flashblock: fb,
         received_at: chrono::Local::now(),
     })
     .await;
 }
 
+/// Polls the conductor cluster and pushes the current Raft leader's flashblocks
+/// WebSocket URL into `url_tx` whenever leadership changes.
+///
+/// Only conductor nodes that have a `flashblocks_ws` configured are considered.
+/// The task exits immediately if no such nodes exist.
 /// Summary of the initial DA backlog between safe and latest blocks.
 #[derive(Debug, Clone)]
 pub(crate) struct InitialBacklog {
@@ -365,6 +423,7 @@ pub(crate) async fn run_l1_blob_watcher(
             .await
     {
         let _ = mode_tx.send(L1ConnectionMode::Polling).await;
+        let _ = toast_tx.try_send(Toast::info("L1 watcher fell back to HTTP polling"));
         run_l1_blob_watcher_poll(&l1_rpc, batcher_address, result_tx, &toast_tx).await;
     }
 }
@@ -495,5 +554,284 @@ fn extract_l1_block_info(
         timestamp: block.header.timestamp,
         total_blobs,
         base_blobs,
+    }
+}
+
+/// Summary of a single transaction within a block.
+#[derive(Debug, Clone)]
+pub(crate) struct TxSummary {
+    /// Transaction hash.
+    pub hash: B256,
+    /// Sender address.
+    pub from: Address,
+    /// Recipient address (None for contract creations).
+    pub to: Option<Address>,
+    /// Effective priority fee per gas (tip), in wei.
+    pub effective_priority_fee_per_gas: Option<u128>,
+    /// Block base fee per gas, in wei.
+    pub base_fee_per_gas: Option<u64>,
+}
+
+fn effective_priority_fee_per_gas(
+    base_fee_per_gas: Option<u64>,
+    effective_gas_price: u128,
+    max_priority_fee_per_gas: Option<u128>,
+) -> Option<u128> {
+    base_fee_per_gas
+        .map(|base_fee| effective_gas_price.saturating_sub(u128::from(base_fee)))
+        .or(max_priority_fee_per_gas)
+}
+
+/// Decodes raw EIP-2718 encoded transaction bytes into summaries.
+///
+/// Used to extract transaction details from flashblock stream data without RPC calls.
+pub(crate) fn decode_flashblock_transactions(
+    raw_txs: &[Bytes],
+    base_fee_per_gas: Option<u64>,
+) -> Vec<TxSummary> {
+    raw_txs
+        .iter()
+        .filter_map(|tx_bytes| {
+            let envelope = OpTxEnvelope::decode_2718(&mut tx_bytes.as_ref())
+                .inspect_err(|e| warn!(error = %e, "failed to decode transaction"))
+                .ok()?;
+            let hash = envelope.tx_hash();
+            let to = envelope.to();
+            let effective_priority_fee_per_gas = effective_priority_fee_per_gas(
+                base_fee_per_gas,
+                envelope.effective_gas_price(base_fee_per_gas),
+                envelope.max_priority_fee_per_gas(),
+            );
+            let recovered = envelope
+                .try_into_recovered()
+                .inspect_err(|e| warn!(error = %e, "failed to recover signer"))
+                .ok()?;
+            Some(TxSummary {
+                hash,
+                from: recovered.signer(),
+                to,
+                effective_priority_fee_per_gas,
+                base_fee_per_gas,
+            })
+        })
+        .collect()
+}
+
+/// Fetches all transactions for a given block and sends summaries through the channel.
+pub(crate) async fn fetch_block_transactions(
+    l2_rpc: String,
+    block_number: u64,
+    tx: mpsc::Sender<Result<Vec<TxSummary>, String>>,
+) {
+    let result = async {
+        let provider = Arc::new(
+            ProviderBuilder::new()
+                .disable_recommended_fillers()
+                .network::<Base>()
+                .connect(&l2_rpc)
+                .await?,
+        );
+
+        let block = provider
+            .get_block_by_number(BlockNumberOrTag::Number(block_number))
+            .full()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Block {block_number} not found"))?;
+
+        let base_fee = block.header.base_fee_per_gas;
+
+        let summaries: Vec<TxSummary> = block
+            .transactions
+            .txns()
+            .map(|tx_obj| TxSummary {
+                hash: tx_obj.inner.tx_hash(),
+                from: tx_obj.inner.inner.signer(),
+                to: tx_obj.inner.to(),
+                effective_priority_fee_per_gas: effective_priority_fee_per_gas(
+                    base_fee,
+                    tx_obj.inner.effective_gas_price(base_fee),
+                    tx_obj.max_priority_fee_per_gas(),
+                ),
+                base_fee_per_gas: base_fee,
+            })
+            .collect();
+
+        Ok::<_, anyhow::Error>(summaries)
+    }
+    .await;
+
+    match result {
+        Ok(summaries) => {
+            let _ = tx.send(Ok(summaries)).await;
+        }
+        Err(e) => {
+            warn!(error = %e, block = block_number, "failed to fetch block transactions");
+            let _ = tx.send(Err(e.to_string())).await;
+        }
+    }
+}
+
+/// Live status snapshot for a single node in an HA conductor cluster.
+#[derive(Debug, Clone)]
+pub(crate) struct ConductorNodeStatus {
+    /// Human-readable name for this node.
+    pub name: String,
+    /// Whether this node is the Raft leader. `None` means the node is unreachable.
+    pub is_leader: Option<bool>,
+    /// Unsafe L2 block number from `optimism_syncStatus`. `None` means unreachable.
+    pub unsafe_l2_block: Option<u64>,
+    /// Safe L2 block number from `optimism_syncStatus`. `None` means unreachable.
+    pub safe_l2_block: Option<u64>,
+    /// Finalized L2 block number from `optimism_syncStatus`. `None` means unreachable.
+    pub finalized_l2_block: Option<u64>,
+    /// Number of connected P2P peers from `opp2p_peerStats`. `None` means unreachable.
+    pub peer_count: Option<u32>,
+}
+
+/// Finds the current Raft leader and transfers leadership.
+///
+/// If `target_name` is `None`, leadership is transferred to any available peer
+/// (`conductor_transferLeader`). If `target_name` is `Some(name)`, leadership
+/// is transferred to the named node via `conductor_transferLeaderToServer`.
+///
+/// The result — `Ok(description)` or `Err(message)` — is sent to `result_tx`.
+pub(crate) async fn transfer_conductor_leader(
+    nodes: Vec<ConductorNodeConfig>,
+    target_name: Option<String>,
+    result_tx: mpsc::Sender<Result<String, String>>,
+) {
+    const TIMEOUT: Duration = Duration::from_millis(500);
+
+    let outcome: anyhow::Result<String> = async {
+        let mut leader_client = None;
+        let mut leader_name = String::new();
+
+        for node in &nodes {
+            let client = HttpClientBuilder::default()
+                .request_timeout(TIMEOUT)
+                .build(node.conductor_rpc.as_str())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if ConductorApiClient::conductor_leader(&client).await.unwrap_or(false) {
+                leader_client = Some(client);
+                leader_name = node.name.clone();
+                break;
+            }
+        }
+
+        let leader = leader_client.ok_or_else(|| anyhow::anyhow!("no leader found in cluster"))?;
+
+        match target_name {
+            None => {
+                ConductorApiClient::conductor_transfer_leader(&leader)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(format!("leadership transferred from {leader_name}"))
+            }
+            Some(ref target) => {
+                let target_node = nodes
+                    .iter()
+                    .find(|n| n.name == *target)
+                    .ok_or_else(|| anyhow::anyhow!("target node {target} not found"))?;
+                ConductorApiClient::conductor_transfer_leader_to_server(
+                    &leader,
+                    target_node.server_id.clone(),
+                    target_node.raft_addr.clone(),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(format!("leadership transferred to {target}"))
+            }
+        }
+    }
+    .await;
+
+    let _ = result_tx.send(outcome.map_err(|e| e.to_string())).await;
+}
+
+/// Polls all conductor nodes every 200 ms and forwards status snapshots.
+///
+/// Builds one pair of HTTP clients per node (conductor RPC + CL RPC) before
+/// entering the loop so connection setup cost is paid only once. Each poll
+/// fires all per-node requests concurrently via [`futures::future::join_all`].
+/// Any individual RPC that times out or errors yields `None` for that field —
+/// the node is shown as offline when `is_leader` is `None`.
+pub(crate) async fn run_conductor_poller(
+    nodes: Vec<ConductorNodeConfig>,
+    tx: mpsc::Sender<Vec<ConductorNodeStatus>>,
+) {
+    const POLL_INTERVAL: Duration = Duration::from_millis(200);
+    const RPC_TIMEOUT: Duration = Duration::from_millis(500);
+
+    let clients: Vec<(String, _, _)> = nodes
+        .into_iter()
+        .filter_map(|node| {
+            let conductor_client = HttpClientBuilder::default()
+                .request_timeout(RPC_TIMEOUT)
+                .build(node.conductor_rpc.as_str())
+                .inspect_err(|e| {
+                    warn!(error = %e, node = %node.name, "failed to build conductor HTTP client");
+                })
+                .ok()?;
+            let cl_client = HttpClientBuilder::default()
+                .request_timeout(RPC_TIMEOUT)
+                .build(node.cl_rpc.as_str())
+                .inspect_err(|e| {
+                    warn!(error = %e, node = %node.name, "failed to build CL HTTP client");
+                })
+                .ok()?;
+            Some((node.name, conductor_client, cl_client))
+        })
+        .collect();
+
+    let mut interval = tokio::time::interval(POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+
+        let statuses = futures::future::join_all(clients.iter().map(
+            |(name, conductor_client, cl_client)| async move {
+                let is_leader = ConductorApiClient::conductor_leader(conductor_client).await.ok();
+                let sync = RollupNodeApiClient::op_sync_status(cl_client).await.ok();
+                let unsafe_l2_block = sync.as_ref().map(|s| s.unsafe_l2.block_info.number);
+                let safe_l2_block = sync.as_ref().map(|s| s.safe_l2.block_info.number);
+                let finalized_l2_block = sync.as_ref().map(|s| s.finalized_l2.block_info.number);
+                let peer_count =
+                    OpP2PApiClient::opp2p_peer_stats(cl_client).await.ok().map(|s| s.connected);
+                ConductorNodeStatus {
+                    name: name.clone(),
+                    is_leader,
+                    unsafe_l2_block,
+                    safe_l2_block,
+                    finalized_l2_block,
+                    peer_count,
+                }
+            },
+        ))
+        .await;
+
+        if tx.send(statuses).await.is_err() {
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_priority_fee_per_gas;
+
+    #[test]
+    fn priority_fee_uses_effective_gas_price_when_base_fee_known() {
+        assert_eq!(effective_priority_fee_per_gas(Some(100), 125, Some(50)), Some(25));
+    }
+
+    #[test]
+    fn priority_fee_falls_back_to_declared_max_priority_fee_when_base_fee_unknown() {
+        assert_eq!(effective_priority_fee_per_gas(None, 125, Some(50)), Some(50));
+    }
+
+    #[test]
+    fn priority_fee_is_unknown_for_legacy_txs_when_base_fee_unknown() {
+        assert_eq!(effective_priority_fee_per_gas(None, 125, None), None);
     }
 }

@@ -19,6 +19,8 @@ jobs:
     name: Review PR
     # Note: This job runs on the BaseRunnerGroup to be able to access LLM Gateway
     # It will not work on other runners
+    # Skip for external contributor PRs (forks) — secrets and runner group are unavailable
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on:
       group: BaseRunnerGroup
     steps:
@@ -36,6 +38,8 @@ jobs:
             ${{ vars.LLM_GATEWAY_HOSTNAME }}:443
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
       - name: Run Claude Code
         id: claude-review
         uses: anthropics/claude-code-action@1b8ee3b94104046d71fde52ec3557651ad8c0d71 # v1.0.29

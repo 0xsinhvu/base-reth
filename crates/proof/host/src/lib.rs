@@ -3,31 +3,41 @@
 mod error;
 pub use error::{HostError, Result};
 
-mod eth;
-pub use eth::rpc_provider;
+mod config;
+pub use config::{HostConfig, HostProviders, ProverConfig};
+
+mod host;
+pub use host::Host;
 
 mod server;
-pub use server::{PreimageServer, PreimageServerError};
+pub use server::PreimageServer;
+
+mod handler;
+pub use handler::{handle_hint, parse_blob_hint};
 
 mod kv;
 #[cfg(feature = "disk")]
 pub use kv::DiskKeyValueStore;
-pub use kv::{KeyValueStore, MemoryKeyValueStore, SharedKeyValueStore, SplitKeyValueStore};
+pub use kv::{
+    BootKeyValueStore, KeyValueStore, MemoryKeyValueStore, SharedKeyValueStore, SplitKeyValueStore,
+    store_ordered_trie,
+};
+
+mod recording;
+pub use recording::RecordingOracle;
 
 mod backend;
-#[cfg(feature = "single")]
-pub use backend::{HintHandler, OnlineHostBackend, OnlineHostBackendCfg};
-pub use backend::{OfflineHostBackend, store_ordered_trie};
+pub use backend::{OfflineHostBackend, OnlineHostBackend};
+
+mod metrics;
+pub use metrics::Metrics;
+#[doc(hidden)]
+pub use metrics::{DropTimer, ProofGuard};
+
+mod service;
+pub use service::{ProverError, ProverService};
 
 #[cfg(feature = "precompiles")]
 mod precompiles;
 #[cfg(feature = "precompiles")]
 pub use precompiles::execute;
-
-#[cfg(feature = "single")]
-mod single;
-#[cfg(feature = "single")]
-pub use single::{
-    SingleChainHintHandler, SingleChainHost, SingleChainHostError, SingleChainLocalInputs,
-    SingleChainProviders, parse_blob_hint,
-};

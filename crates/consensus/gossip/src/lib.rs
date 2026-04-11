@@ -1,6 +1,9 @@
 #![doc = include_str!("../README.md")]
-#![doc(html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4")]
-#![doc(issue_tracker_base_url = "https://github.com/base/base/issues/")]
+#![doc(
+    html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    issue_tracker_base_url = "https://github.com/base/base/issues/"
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
@@ -31,14 +34,10 @@ pub use config::{
 };
 
 mod gate;
-pub use gate::ConnectionGate; // trait
+pub use gate::ConnectionGate;
 
 mod gater;
-pub use gater::{
-    ConnectionGater, // implementation
-    DialInfo,
-    GaterConfig,
-};
+pub use gater::{ConnectionGater, DialInfo, GaterConfig};
 
 mod builder;
 pub use builder::GossipDriverBuilder;

@@ -11,9 +11,9 @@ pub enum ProposerError {
     #[error("RPC error: {0}")]
     Rpc(#[from] RpcError),
 
-    /// Enclave communication error.
-    #[error("Enclave error: {0}")]
-    Enclave(String),
+    /// Prover server communication error.
+    #[error("Prover error: {0}")]
+    Prover(String),
 
     /// Contract interaction error.
     #[error("Contract error: {0}")]
@@ -66,9 +66,9 @@ pub enum ProposerError {
     #[error("failed to derive block info: {0}")]
     BlockInfoDerivation(String),
 
-    /// Failed to serialize transaction.
-    #[error("failed to serialize transaction: {0}")]
-    TxSerialization(String),
+    /// Transaction manager error (nonce, fees, RPC, signing, etc.).
+    #[error(transparent)]
+    TxManager(#[from] base_tx_manager::TxManagerError),
 }
 
 impl From<ContractError> for ProposerError {

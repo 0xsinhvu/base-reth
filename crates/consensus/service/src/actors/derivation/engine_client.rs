@@ -29,7 +29,7 @@ pub trait DerivationEngineClient: Debug + Send + Sync {
 }
 
 /// Client to use to send messages to the Engine Actor's inbound channel.
-#[derive(Constructor, Debug)]
+#[derive(Clone, Constructor, Debug)]
 pub struct QueuedDerivationEngineClient {
     /// A channel to use to send the [`EngineActorRequest`]s to the `EngineActor`.
     pub engine_actor_request_tx: mpsc::Sender<EngineActorRequest>,
@@ -51,7 +51,7 @@ impl DerivationEngineClient for QueuedDerivationEngineClient {
             .await
             .inspect(|_| info!(target: "derivation", "Engine reset successfully."))
             .ok_or_else(|| {
-                error!(target: "derivation_engine_client", "Failed to receive built payload");
+                error!(target: "derivation_engine_client", "Failed to receive forkchoice reset result");
                 EngineClientError::ResponseError("response channel closed.".to_string())
             })?
     }

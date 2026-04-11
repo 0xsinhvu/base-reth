@@ -2,9 +2,7 @@
 
 use core::{net::SocketAddr, time::Duration};
 
-use base_builder_core::{
-    BuilderConfig, ExecutionMeteringMode, FlashblocksConfig, SharedMeteringProvider,
-};
+use base_builder_core::{BuilderConfig, ExecutionMeteringMode, SharedMeteringProvider};
 use base_builder_metering::MeteringStore;
 use base_node_core::args::RollupArgs;
 
@@ -28,37 +26,12 @@ pub struct FlashblocksArgs {
     #[arg(long = "flashblocks.block-time", default_value = "250", env = "FLASHBLOCK_BLOCK_TIME")]
     pub flashblocks_block_time: u64,
 
-    /// Builder would always try to produce fixed number of flashblocks without regard to time of
-    /// FCU arrival.
-    /// In cases of late FCU it could lead to partially filled blocks.
-    #[arg(long = "flashblocks.fixed", default_value = "false", env = "FLASHBLOCK_FIXED")]
-    pub flashblocks_fixed: bool,
-
     /// Time by which blocks would be completed earlier in milliseconds.
     ///
     /// This time is used to account for latencies and would be deducted from total block
     /// building time before calculating number of fbs.
     #[arg(long = "flashblocks.leeway-time", default_value = "75", env = "FLASHBLOCK_LEEWAY_TIME")]
     pub flashblocks_leeway_time: u64,
-
-    /// Whether to disable state root calculation for each flashblock
-    #[arg(
-        long = "flashblocks.disable-state-root",
-        default_value = "false",
-        env = "FLASHBLOCKS_DISABLE_STATE_ROOT"
-    )]
-    pub flashblocks_disable_state_root: bool,
-
-    /// Whether to compute state root only when `get_payload` is called (finalization).
-    /// When enabled, flashblocks are built without state root, but the final payload
-    /// returned by `get_payload` will have the state root computed.
-    /// Requires --flashblocks.disable-state-root to be effective.
-    #[arg(
-        long = "flashblocks.compute-state-root-on-finalize",
-        default_value = "false",
-        env = "FLASHBLOCKS_COMPUTE_STATE_ROOT_ON_FINALIZE"
-    )]
-    pub flashblocks_compute_state_root_on_finalize: bool,
 }
 
 impl Default for FlashblocksArgs {
@@ -67,16 +40,13 @@ impl Default for FlashblocksArgs {
             flashblocks_port: 1111,
             flashblocks_addr: "127.0.0.1".to_string(),
             flashblocks_block_time: 250,
-            flashblocks_fixed: false,
             flashblocks_leeway_time: 75,
-            flashblocks_disable_state_root: false,
-            flashblocks_compute_state_root_on_finalize: false,
         }
     }
 }
 
 /// Parameters for rollup configuration
-#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+#[derive(Debug, Clone, clap::Args)]
 #[command(next_help_heading = "Rollup")]
 pub struct Args {
     /// Rollup configuration
@@ -95,17 +65,21 @@ pub struct Args {
     #[arg(long = "builder.max-execution-time-per-tx-us")]
     pub max_execution_time_per_tx_us: Option<u128>,
 
-    /// Maximum state root calculation time per transaction in microseconds (requires resource metering)
-    #[arg(long = "builder.max-state-root-time-per-tx-us")]
-    pub max_state_root_time_per_tx_us: Option<u128>,
-
     /// Flashblock-level execution time budget in microseconds (requires resource metering)
     #[arg(long = "builder.flashblock-execution-time-budget-us")]
     pub flashblock_execution_time_budget_us: Option<u128>,
 
-    /// Block-level state root calculation time budget in microseconds (requires resource metering)
-    #[arg(long = "builder.block-state-root-time-budget-us")]
-    pub block_state_root_time_budget_us: Option<u128>,
+    /// Block-level state root gas limit (requires resource metering)
+    #[arg(long = "builder.block-state-root-gas-limit")]
+    pub block_state_root_gas_limit: Option<u64>,
+
+    /// State root gas coefficient (K): controls how excess SR time inflates `sr_gas` cost
+    #[arg(long = "builder.state-root-gas-coefficient", default_value = "0.02")]
+    pub state_root_gas_coefficient: f64,
+
+    /// State root gas anchor in microseconds: SR below this produces no penalty
+    #[arg(long = "builder.state-root-gas-anchor-us", default_value = "5000")]
+    pub state_root_gas_anchor_us: u128,
 
     /// Execution metering mode: off, dry-run, or enforce
     #[arg(long = "builder.execution-metering-mode", value_enum, default_value = "off")]
@@ -153,9 +127,10 @@ impl Default for Args {
             chain_block_time: 1000,
             max_gas_per_txn: None,
             max_execution_time_per_tx_us: None,
-            max_state_root_time_per_tx_us: None,
             flashblock_execution_time_budget_us: None,
-            block_state_root_time_budget_us: None,
+            block_state_root_gas_limit: None,
+            state_root_gas_coefficient: 0.02,
+            state_root_gas_anchor_us: 5000,
             execution_metering_mode: ExecutionMeteringMode::Off,
             extra_block_deadline_secs: 20,
             enable_resource_metering: false,
@@ -175,48 +150,31 @@ impl Args {
         self,
         metering_provider: SharedMeteringProvider,
     ) -> eyre::Result<BuilderConfig> {
-        let flashblocks = FlashblocksConfig::try_from(&self)?;
+        let flashblocks_ws_addr = SocketAddr::new(
+            self.flashblocks.flashblocks_addr.parse()?,
+            self.flashblocks.flashblocks_port,
+        );
+
         Ok(BuilderConfig {
             block_time: Duration::from_millis(self.chain_block_time),
             block_time_leeway: Duration::from_secs(self.extra_block_deadline_secs),
             da_config: Default::default(),
             gas_limit_config: Default::default(),
             sampling_ratio: self.sampling_ratio,
+            flashblocks_ws_addr,
+            flashblocks_interval: Duration::from_millis(self.flashblocks.flashblocks_block_time),
+            flashblocks_leeway_time: Duration::from_millis(
+                self.flashblocks.flashblocks_leeway_time,
+            ),
             max_gas_per_txn: self.max_gas_per_txn,
             max_execution_time_per_tx_us: self.max_execution_time_per_tx_us,
-            max_state_root_time_per_tx_us: self.max_state_root_time_per_tx_us,
             flashblock_execution_time_budget_us: self.flashblock_execution_time_budget_us,
-            block_state_root_time_budget_us: self.block_state_root_time_budget_us,
+            block_state_root_gas_limit: self.block_state_root_gas_limit,
+            state_root_gas_coefficient: self.state_root_gas_coefficient,
+            state_root_gas_anchor_us: self.state_root_gas_anchor_us,
             execution_metering_mode: self.execution_metering_mode,
             max_uncompressed_block_size: self.max_uncompressed_block_size,
             metering_provider,
-            flashblocks,
-        })
-    }
-}
-
-impl TryFrom<&Args> for FlashblocksConfig {
-    type Error = eyre::Report;
-
-    fn try_from(args: &Args) -> Result<Self, Self::Error> {
-        let interval = Duration::from_millis(args.flashblocks.flashblocks_block_time);
-
-        let ws_addr = SocketAddr::new(
-            args.flashblocks.flashblocks_addr.parse()?,
-            args.flashblocks.flashblocks_port,
-        );
-
-        let leeway_time = Duration::from_millis(args.flashblocks.flashblocks_leeway_time);
-
-        Ok(Self {
-            ws_addr,
-            interval,
-            leeway_time,
-            fixed: args.flashblocks.flashblocks_fixed,
-            disable_state_root: args.flashblocks.flashblocks_disable_state_root,
-            compute_state_root_on_finalize: args
-                .flashblocks
-                .flashblocks_compute_state_root_on_finalize,
         })
     }
 }
@@ -282,43 +240,7 @@ mod tests {
             ..Default::default()
         };
         let config = convert(args);
-        assert_eq!(config.flashblocks.interval, Duration::from_millis(expected_ms));
-    }
-
-    #[rstest]
-    #[case::fixed_true(true, true)]
-    #[case::fixed_false(false, false)]
-    fn flashblocks_fixed_mode_maps_correctly(#[case] input: bool, #[case] expected: bool) {
-        let args = Args {
-            flashblocks: FlashblocksArgs { flashblocks_fixed: input, ..Default::default() },
-            ..Default::default()
-        };
-        let config = convert(args);
-        assert_eq!(config.flashblocks.fixed, expected);
-    }
-
-    #[rstest]
-    #[case::both_enabled(true, true, true, true)]
-    #[case::both_disabled(false, false, false, false)]
-    #[case::disable_only(true, false, true, false)]
-    #[case::finalize_only(false, true, false, true)]
-    fn flashblocks_state_root_options_map_correctly(
-        #[case] disable_input: bool,
-        #[case] finalize_input: bool,
-        #[case] disable_expected: bool,
-        #[case] finalize_expected: bool,
-    ) {
-        let args = Args {
-            flashblocks: FlashblocksArgs {
-                flashblocks_disable_state_root: disable_input,
-                flashblocks_compute_state_root_on_finalize: finalize_input,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let config = convert(args);
-        assert_eq!(config.flashblocks.disable_state_root, disable_expected);
-        assert_eq!(config.flashblocks.compute_state_root_on_finalize, finalize_expected);
+        assert_eq!(config.flashblocks_interval, Duration::from_millis(expected_ms));
     }
 
     #[test]
@@ -347,6 +269,8 @@ mod tests {
                 total_gas_used: 21000,
                 total_execution_time_us: 500,
                 state_root_time_us: 100,
+                state_root_account_node_count: 0,
+                state_root_storage_node_count: 0,
             },
         );
 
@@ -363,7 +287,6 @@ mod tests {
             flashblocks: FlashblocksArgs {
                 flashblocks_block_time: 200,
                 flashblocks_leeway_time: 50,
-                flashblocks_fixed: true,
                 ..Default::default()
             },
             ..Default::default()
@@ -373,8 +296,7 @@ mod tests {
         assert_eq!(config.block_time, Duration::from_millis(2000));
         assert_eq!(config.max_gas_per_txn, Some(100000));
         assert_eq!(config.block_time_leeway, Duration::from_secs(10));
-        assert_eq!(config.flashblocks.interval, Duration::from_millis(200));
-        assert_eq!(config.flashblocks.leeway_time, Duration::from_millis(50));
-        assert!(config.flashblocks.fixed);
+        assert_eq!(config.flashblocks_interval, Duration::from_millis(200));
+        assert_eq!(config.flashblocks_leeway_time, Duration::from_millis(50));
     }
 }

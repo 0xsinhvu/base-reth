@@ -5,7 +5,7 @@ use alloy_consensus::{
 };
 use alloy_eips::eip7702::SignedAuthorization;
 use alloy_network_primitives::TransactionBuilder7702;
-use alloy_primitives::{Address, Signature, TxKind, U256};
+use alloy_primitives::{Address, Bytes, ChainId, Signature, TxKind, U256};
 use alloy_rpc_types_eth::{AccessList, TransactionInput, TransactionRequest};
 use base_alloy_consensus::{OpTxEnvelope, OpTypedTransaction, TxDeposit};
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,19 @@ impl OpTransactionRequest {
         self
     }
 
+    /// Sets the chain ID for the transaction.
+    pub const fn chain_id(mut self, chain_id: ChainId) -> Self {
+        self.0.chain_id = Some(chain_id);
+        self
+    }
+
+    /// Sets the input data as deploy (CREATE) bytecode.
+    pub fn deploy_code(mut self, code: impl Into<Bytes>) -> Self {
+        self.0.to = Some(TxKind::Create);
+        self.0.input.input = Some(code.into());
+        self
+    }
+
     /// Sets the access list for the transaction.
     pub fn access_list(mut self, access_list: AccessList) -> Self {
         self.0.access_list = Some(access_list);
@@ -94,7 +107,7 @@ impl OpTransactionRequest {
     /// Builds [`OpTypedTransaction`] from this builder. See [`TransactionRequest::build_typed_tx`]
     /// for more info.
     ///
-    /// Note that EIP-4844 transactions are not supported on OP chains and will be converted into
+    /// Note that EIP-4844 transactions are not supported on Base chains and will be converted into
     /// EIP-1559 transactions.
     #[allow(clippy::result_large_err)]
     pub fn build_typed_tx(self) -> Result<OpTypedTransaction, Self> {

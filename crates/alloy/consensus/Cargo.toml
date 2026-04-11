@@ -51,9 +51,10 @@ reth-ethereum-primitives = { workspace = true, optional = true, features = ["ser
 
 [dev-dependencies]
 rand.workspace = true
-bincode = { workspace = true, features = ["serde"] }
+rstest.workspace = true
 serde_json.workspace = true
 alloy-signer.workspace = true
+bincode = { workspace = true, features = ["serde"] }
 arbitrary = { workspace = true, features = ["derive"] }
 alloy-primitives = { workspace = true, features = ["rand", "arbitrary"] }
 

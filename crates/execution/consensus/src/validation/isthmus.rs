@@ -126,7 +126,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::sync::Arc;
     use core::str::FromStr;
 

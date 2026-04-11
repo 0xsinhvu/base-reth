@@ -1,6 +1,6 @@
 //! Batch Types
 //!
-//! This module contains the batch types for the OP Stack derivation pipeline.
+//! This module contains the batch types for the Base derivation pipeline.
 //!
 //! ## Batch
 //!
@@ -19,10 +19,11 @@ pub const SINGLE_BATCH_TYPE: u8 = 0x00;
 pub const SPAN_BATCH_TYPE: u8 = 0x01;
 
 /// The Batch Type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BatchType {
     /// Single Batch.
+    #[default]
     Single = SINGLE_BATCH_TYPE,
     /// Span Batch.
     Span = SPAN_BATCH_TYPE,
@@ -56,7 +57,7 @@ impl Decodable for BatchType {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec::Vec;
 
     use super::*;

@@ -1,16 +1,14 @@
 //! Configuration types and validation for the proposer.
 
-use std::{net::IpAddr, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use alloy_primitives::{Address, B256};
-use alloy_signer::k256::ecdsa::SigningKey;
-use alloy_signer_local::PrivateKeySigner;
 use base_cli_utils::{LogConfig, MetricsConfig};
 use base_proof_rpc::RetryConfig;
 use thiserror::Error;
 use url::Url;
 
-use crate::cli::{Cli, ProposerArgs, RpcServerArgs};
+use crate::cli::{Cli, ProposerArgs};
 
 /// Errors that can occur during configuration validation.
 #[derive(Debug, Error)]
@@ -42,53 +40,24 @@ pub enum ConfigError {
     /// Invalid signing configuration.
     #[error("invalid signing config: {0}")]
     Signing(String),
-}
-
-/// Signing configuration for L1 transaction submission.
-#[derive(Clone)]
-pub enum SigningConfig {
-    /// Local signing with an in-process private key (development).
-    Local {
-        /// The private key signer.
-        signer: PrivateKeySigner,
-    },
-    /// Remote signing via a signer sidecar JSON-RPC endpoint (production).
-    Remote {
-        /// URL of the signer sidecar.
-        endpoint: Url,
-        /// Address of the signer account.
-        address: Address,
-    },
-}
-
-impl std::fmt::Debug for SigningConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Local { signer } => {
-                f.debug_struct("Local").field("address", &signer.address()).finish()
-            }
-            Self::Remote { endpoint, address } => f
-                .debug_struct("Remote")
-                .field("endpoint", endpoint)
-                .field("address", address)
-                .finish(),
-        }
-    }
+    /// Invalid transaction manager configuration.
+    #[error("invalid tx manager config: {0}")]
+    TxManager(String),
 }
 
 /// Validated proposer configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ProposerConfig {
+    /// Dry-run mode: source proofs but do not submit transactions on-chain.
+    pub dry_run: bool,
     /// Allow proposals based on non-finalized L1 data.
     pub allow_non_finalized: bool,
-    /// URL of the enclave RPC endpoint.
-    pub enclave_rpc: Url,
+    /// URL of the prover RPC endpoint.
+    pub prover_rpc: Url,
     /// URL of the L1 Ethereum RPC endpoint.
     pub l1_eth_rpc: Url,
     /// URL of the L2 Ethereum RPC endpoint.
     pub l2_eth_rpc: Url,
-    /// Use reth-specific RPC calls for L2.
-    pub l2_reth: bool,
     /// Address of the `AnchorStateRegistry` contract on L1.
     pub anchor_state_registry_addr: Address,
     /// Address of the `DisputeGameFactory` contract on L1.
@@ -111,23 +80,53 @@ pub struct ProposerConfig {
     pub log: LogConfig,
     /// Metrics server configuration.
     pub metrics: MetricsConfig,
-    /// RPC server configuration.
-    pub rpc: RpcServerConfig,
+    /// Health server socket address.
+    pub health_addr: SocketAddr,
+    /// Admin RPC server socket address. `None` when admin is disabled.
+    pub admin_addr: Option<SocketAddr>,
     /// RPC retry configuration.
     pub retry: RetryConfig,
     /// Signing configuration for L1 transaction submission.
-    pub signing: SigningConfig,
+    /// `None` when running in dry-run mode.
+    pub signing: Option<base_tx_manager::SignerConfig>,
+    /// Transaction manager configuration.
+    /// `None` when running in dry-run mode.
+    pub tx_manager: Option<base_tx_manager::TxManagerConfig>,
+    /// Maximum number of concurrent proof tasks.
+    /// When > 1, uses the parallel proving pipeline instead of the sequential driver.
+    pub max_parallel_proofs: usize,
+    /// Maximum number of games to scan backwards when recovering state on startup.
+    pub max_game_recovery_lookback: u64,
+    /// Optional address of the `TEEProverRegistry` contract on L1.
+    /// When set, the proposer validates signers before on-chain submission.
+    pub tee_prover_registry_address: Option<Address>,
 }
 
 impl ProposerConfig {
     /// Create a validated configuration from CLI arguments.
     pub fn from_cli(cli: Cli) -> Result<Self, ConfigError> {
         // Validate URLs have scheme and host
-        validate_url(&cli.proposer.enclave_rpc, "enclave-rpc")?;
+        validate_url(&cli.proposer.prover_rpc, "prover-rpc")?;
         validate_url(&cli.proposer.l1_eth_rpc, "l1-eth-rpc")?;
         validate_url(&cli.proposer.l2_eth_rpc, "l2-eth-rpc")?;
 
         validate_url(&cli.proposer.rollup_rpc, "rollup-rpc")?;
+
+        if cli.proposer.max_parallel_proofs == 0 {
+            return Err(ConfigError::OutOfRange {
+                field: "max-parallel-proofs",
+                constraint: "at least 1",
+                value: "0".to_string(),
+            });
+        }
+
+        if cli.proposer.max_game_recovery_lookback == 0 {
+            return Err(ConfigError::OutOfRange {
+                field: "max-game-recovery-lookback",
+                constraint: "at least 1",
+                value: "0".to_string(),
+            });
+        }
 
         // Validate poll_interval > 0
         if cli.proposer.poll_interval.is_zero() {
@@ -145,29 +144,37 @@ impl ProposerConfig {
             ));
         }
 
-        // Validate RPC port when admin is enabled
-        if cli.rpc.enable_admin && cli.rpc.port == 0 {
+        // Validate health port (health server is always started)
+        if cli.health.port == 0 {
+            return Err(ConfigError::Rpc("health server port must be non-zero".to_string()));
+        }
+
+        // Validate admin port when admin is enabled
+        if cli.admin.enabled && cli.admin.port == 0 {
             return Err(ConfigError::Rpc(
-                "RPC port must be non-zero when admin is enabled".to_string(),
+                "admin RPC port must be non-zero when admin is enabled".to_string(),
             ));
         }
 
-        // Validate and extract signing config
-        let signing = build_signing_config(
-            cli.proposer.private_key.as_deref(),
-            cli.proposer.signer_endpoint.as_ref(),
-            cli.proposer.signer_address.as_ref(),
-        )?;
-
-        // Extract retry config before moving other proposer fields
+        // Extract retry config before moving signer out of proposer
         let retry = RetryConfig::from(&cli.proposer);
 
+        let (signing, tx_manager) = if cli.proposer.dry_run {
+            (None, None)
+        } else {
+            let s = base_tx_manager::SignerConfig::try_from(cli.proposer.signer)
+                .map_err(|e| ConfigError::Signing(e.to_string()))?;
+            let t = base_tx_manager::TxManagerConfig::try_from(cli.proposer.tx_manager)
+                .map_err(|e| ConfigError::TxManager(e.to_string()))?;
+            (Some(s), Some(t))
+        };
+
         Ok(Self {
+            dry_run: cli.proposer.dry_run,
             allow_non_finalized: cli.proposer.allow_non_finalized,
-            enclave_rpc: cli.proposer.enclave_rpc,
+            prover_rpc: cli.proposer.prover_rpc,
             l1_eth_rpc: cli.proposer.l1_eth_rpc,
             l2_eth_rpc: cli.proposer.l2_eth_rpc,
-            l2_reth: cli.proposer.l2_reth,
             anchor_state_registry_addr: cli.proposer.anchor_state_registry_addr,
             dispute_game_factory_addr: cli.proposer.dispute_game_factory_addr,
             game_type: cli.proposer.game_type,
@@ -176,12 +183,17 @@ impl ProposerConfig {
             rpc_timeout: cli.proposer.rpc_timeout,
             retry,
             signing,
+            tx_manager,
             rollup_rpc: cli.proposer.rollup_rpc,
             skip_tls_verify: cli.proposer.skip_tls_verify,
             wait_node_sync: cli.proposer.wait_node_sync,
+            max_parallel_proofs: cli.proposer.max_parallel_proofs,
+            max_game_recovery_lookback: cli.proposer.max_game_recovery_lookback,
+            tee_prover_registry_address: cli.proposer.tee_prover_registry_address,
             log: LogConfig::from(cli.logging),
             metrics: cli.metrics.into(),
-            rpc: RpcServerConfig::from(cli.rpc),
+            health_addr: cli.health.socket_addr(),
+            admin_addr: cli.admin.enabled.then(|| cli.admin.socket_addr()),
         })
     }
 }
@@ -199,68 +211,6 @@ fn validate_url(url: &Url, field: &'static str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Validate and build [`SigningConfig`] from CLI arguments.
-///
-/// Exactly one of `private_key` or (`signer_endpoint` + `signer_address`) must be provided.
-fn build_signing_config(
-    private_key: Option<&str>,
-    signer_endpoint: Option<&Url>,
-    signer_address: Option<&Address>,
-) -> Result<SigningConfig, ConfigError> {
-    match (private_key, signer_endpoint, signer_address) {
-        (Some(pk), None, None) => {
-            let hex_str = pk.strip_prefix("0x").unwrap_or(pk);
-            let key_bytes = hex::decode(hex_str)
-                .map_err(|e| ConfigError::Signing(format!("invalid private key hex: {e}")))?;
-            let signing_key = SigningKey::from_slice(&key_bytes)
-                .map_err(|e| ConfigError::Signing(format!("invalid private key: {e}")))?;
-            let signer = PrivateKeySigner::from_signing_key(signing_key);
-            Ok(SigningConfig::Local { signer })
-        }
-        (None, Some(endpoint), Some(address)) => {
-            validate_url(endpoint, "signer-endpoint")?;
-            Ok(SigningConfig::Remote { endpoint: endpoint.clone(), address: *address })
-        }
-        (None, None, None) => Err(ConfigError::Signing(
-            "one of --private-key or (--signer-endpoint + --signer-address) must be provided"
-                .to_string(),
-        )),
-        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(ConfigError::Signing(
-            "--private-key is mutually exclusive with --signer-endpoint/--signer-address"
-                .to_string(),
-        )),
-        (None, Some(_), None) => {
-            Err(ConfigError::Signing("--signer-endpoint requires --signer-address".to_string()))
-        }
-        (None, None, Some(_)) => {
-            Err(ConfigError::Signing("--signer-address requires --signer-endpoint".to_string()))
-        }
-    }
-}
-
-/// Validated RPC server configuration.
-#[derive(Debug, Clone)]
-pub struct RpcServerConfig {
-    /// Whether admin RPC methods are enabled.
-    pub enable_admin: bool,
-    /// RPC server bind address.
-    pub addr: IpAddr,
-    /// RPC server port.
-    pub port: u16,
-}
-
-impl From<RpcServerArgs> for RpcServerConfig {
-    fn from(args: RpcServerArgs) -> Self {
-        Self { enable_admin: args.enable_admin, addr: args.addr, port: args.port }
-    }
-}
-
-impl Default for RpcServerConfig {
-    fn default() -> Self {
-        Self { enable_admin: false, addr: "127.0.0.1".parse().unwrap(), port: 8545 }
-    }
-}
-
 impl From<&ProposerArgs> for RetryConfig {
     fn from(args: &ProposerArgs) -> Self {
         Self {
@@ -276,16 +226,18 @@ mod tests {
     use base_cli_utils::LogFormat;
 
     use super::*;
-    use crate::cli::{Cli, LogArgs, MetricsArgs, ProposerArgs};
+    use crate::cli::{
+        AdminArgs, Cli, HealthArgs, LogArgs, MetricsArgs, ProposerArgs, SignerCli, TxManagerCli,
+    };
 
     fn minimal_cli() -> Cli {
         Cli {
             proposer: ProposerArgs {
+                dry_run: false,
                 allow_non_finalized: false,
-                enclave_rpc: Url::parse("http://localhost:8080").unwrap(),
+                prover_rpc: Url::parse("http://localhost:8080").unwrap(),
                 l1_eth_rpc: Url::parse("http://localhost:8545").unwrap(),
                 l2_eth_rpc: Url::parse("http://localhost:9545").unwrap(),
-                l2_reth: false,
                 anchor_state_registry_addr: "0x1234567890123456789012345678901234567890"
                     .parse()
                     .unwrap(),
@@ -302,12 +254,18 @@ mod tests {
                 rpc_max_retries: 5,
                 rpc_retry_initial_delay: Duration::from_millis(100),
                 rpc_retry_max_delay: Duration::from_secs(10),
-                private_key: Some(
-                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-                        .to_string(),
-                ),
-                signer_endpoint: None,
-                signer_address: None,
+                signer: SignerCli {
+                    private_key: Some(
+                        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                            .to_string(),
+                    ),
+                    signer_endpoint: None,
+                    signer_address: None,
+                },
+                max_parallel_proofs: 1,
+                max_game_recovery_lookback: 5000,
+                tee_prover_registry_address: None,
+                tx_manager: TxManagerCli::default(),
             },
             logging: LogArgs {
                 level: 3,
@@ -321,11 +279,8 @@ mod tests {
                 port: 7300,
                 ..Default::default()
             },
-            rpc: RpcServerArgs {
-                enable_admin: false,
-                addr: "127.0.0.1".parse().unwrap(),
-                port: 8545,
-            },
+            health: HealthArgs::default(),
+            admin: AdminArgs::default(),
         }
     }
 
@@ -333,6 +288,7 @@ mod tests {
     fn test_valid_config() {
         let cli = minimal_cli();
         let config = ProposerConfig::from_cli(cli).unwrap();
+        assert!(!config.dry_run);
         assert!(!config.allow_non_finalized);
         assert_eq!(config.game_type, 1);
         assert_eq!(config.poll_interval, Duration::from_secs(12));
@@ -367,22 +323,49 @@ mod tests {
     }
 
     #[test]
-    fn test_rpc_port_zero_when_admin_enabled() {
+    fn test_health_port_zero_rejected() {
         let mut cli = minimal_cli();
-        cli.rpc.enable_admin = true;
-        cli.rpc.port = 0;
+        cli.health.port = 0;
         let result = ProposerConfig::from_cli(cli);
         assert!(matches!(result, Err(ConfigError::Rpc(_))));
     }
 
     #[test]
-    fn test_rpc_port_zero_when_admin_disabled() {
+    fn test_admin_port_zero_when_admin_enabled() {
         let mut cli = minimal_cli();
-        cli.rpc.enable_admin = false;
-        cli.rpc.port = 0;
+        cli.admin.enabled = true;
+        cli.admin.port = 0;
+        let result = ProposerConfig::from_cli(cli);
+        assert!(matches!(result, Err(ConfigError::Rpc(_))));
+    }
+
+    #[test]
+    fn test_admin_port_zero_when_admin_disabled() {
+        let mut cli = minimal_cli();
+        cli.admin.enabled = false;
+        cli.admin.port = 0;
         // Should be fine since admin is disabled
         let result = ProposerConfig::from_cli(cli);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_admin_addr_some_when_enabled() {
+        let mut cli = minimal_cli();
+        cli.admin.enabled = true;
+        let config = ProposerConfig::from_cli(cli).unwrap();
+        assert!(config.admin_addr.is_some());
+        let addr = config.admin_addr.unwrap();
+        assert_eq!(addr.ip(), "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(addr.port(), 8545);
+    }
+
+    #[test]
+    fn test_admin_addr_none_when_disabled() {
+        let mut cli = minimal_cli();
+        cli.admin.enabled = false;
+        let config = ProposerConfig::from_cli(cli).unwrap();
+        assert!(config.admin_addr.is_none());
     }
 
     #[test]
@@ -426,15 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rpc_server_config_from_args() {
-        let args =
-            RpcServerArgs { enable_admin: true, addr: "0.0.0.0".parse().unwrap(), port: 8080 };
-        let config = RpcServerConfig::from(args);
-        assert!(config.enable_admin);
-        assert_eq!(config.port, 8080);
-    }
-
-    #[test]
     fn test_url_without_host() {
         // Create URL that parses but has no host (file:// URLs for instance)
         let url = Url::parse("file:///some/path").unwrap();
@@ -445,8 +419,8 @@ mod tests {
     #[test]
     fn test_config_error_display() {
         let error =
-            ConfigError::InvalidUrl { field: "enclave-rpc", reason: "missing host".to_string() };
-        assert_eq!(error.to_string(), "invalid enclave-rpc URL: missing host");
+            ConfigError::InvalidUrl { field: "prover-rpc", reason: "missing host".to_string() };
+        assert_eq!(error.to_string(), "invalid prover-rpc URL: missing host");
 
         let error = ConfigError::OutOfRange {
             field: "poll-interval",
@@ -469,44 +443,40 @@ mod tests {
     fn test_signing_config_local() {
         let cli = minimal_cli();
         let config = ProposerConfig::from_cli(cli).unwrap();
-        assert!(matches!(config.signing, SigningConfig::Local { .. }));
+        assert!(matches!(config.signing, Some(base_tx_manager::SignerConfig::Local { .. })));
     }
 
     #[test]
     fn test_signing_config_remote() {
         let mut cli = minimal_cli();
-        cli.proposer.private_key = None;
-        cli.proposer.signer_endpoint = Some(Url::parse("http://localhost:8546").unwrap());
-        cli.proposer.signer_address =
-            Some("0x1234567890123456789012345678901234567890".parse().unwrap());
+        cli.proposer.signer = SignerCli {
+            private_key: None,
+            signer_endpoint: Some(Url::parse("http://localhost:8546").unwrap()),
+            signer_address: Some("0x1234567890123456789012345678901234567890".parse().unwrap()),
+        };
         let config = ProposerConfig::from_cli(cli).unwrap();
-        assert!(matches!(config.signing, SigningConfig::Remote { .. }));
+        assert!(matches!(config.signing, Some(base_tx_manager::SignerConfig::Remote { .. })));
     }
 
     #[test]
     fn test_signing_config_none_provided() {
         let mut cli = minimal_cli();
-        cli.proposer.private_key = None;
+        cli.proposer.signer =
+            SignerCli { private_key: None, signer_endpoint: None, signer_address: None };
         let result = ProposerConfig::from_cli(cli);
         assert!(matches!(result, Err(ConfigError::Signing(_))));
     }
 
     #[test]
-    fn test_signing_config_both_provided() {
+    fn test_dry_run_skips_signer_validation() {
         let mut cli = minimal_cli();
-        // private_key is already set in minimal_cli
-        cli.proposer.signer_endpoint = Some(Url::parse("http://localhost:8546").unwrap());
-        let result = ProposerConfig::from_cli(cli);
-        assert!(matches!(result, Err(ConfigError::Signing(_))));
-    }
-
-    #[test]
-    fn test_signing_config_endpoint_without_address() {
-        let mut cli = minimal_cli();
-        cli.proposer.private_key = None;
-        cli.proposer.signer_endpoint = Some(Url::parse("http://localhost:8546").unwrap());
-        let result = ProposerConfig::from_cli(cli);
-        assert!(matches!(result, Err(ConfigError::Signing(_))));
+        cli.proposer.dry_run = true;
+        cli.proposer.signer =
+            SignerCli { private_key: None, signer_endpoint: None, signer_address: None };
+        let config = ProposerConfig::from_cli(cli).unwrap();
+        assert!(config.dry_run);
+        assert!(config.signing.is_none());
+        assert!(config.tx_manager.is_none());
     }
 
     #[test]
@@ -516,5 +486,57 @@ mod tests {
         assert_eq!(config.retry.max_attempts, 5);
         assert_eq!(config.retry.initial_delay, Duration::from_millis(100));
         assert_eq!(config.retry.max_delay, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_max_parallel_proofs_zero_rejected() {
+        let mut cli = minimal_cli();
+        cli.proposer.max_parallel_proofs = 0;
+        let result = ProposerConfig::from_cli(cli);
+        assert!(matches!(
+            result,
+            Err(ConfigError::OutOfRange { field: "max-parallel-proofs", .. })
+        ));
+    }
+
+    #[test]
+    fn test_max_parallel_proofs_default() {
+        let cli = minimal_cli();
+        let config = ProposerConfig::from_cli(cli).unwrap();
+        assert_eq!(config.max_parallel_proofs, 1);
+    }
+
+    #[test]
+    fn test_max_parallel_proofs_custom() {
+        let mut cli = minimal_cli();
+        cli.proposer.max_parallel_proofs = 8;
+        let config = ProposerConfig::from_cli(cli).unwrap();
+        assert_eq!(config.max_parallel_proofs, 8);
+    }
+
+    #[test]
+    fn test_max_game_recovery_lookback_zero_rejected() {
+        let mut cli = minimal_cli();
+        cli.proposer.max_game_recovery_lookback = 0;
+        let result = ProposerConfig::from_cli(cli);
+        assert!(matches!(
+            result,
+            Err(ConfigError::OutOfRange { field: "max-game-recovery-lookback", .. })
+        ));
+    }
+
+    #[test]
+    fn test_max_game_recovery_lookback_default() {
+        let cli = minimal_cli();
+        let config = ProposerConfig::from_cli(cli).unwrap();
+        assert_eq!(config.max_game_recovery_lookback, 5000);
+    }
+
+    #[test]
+    fn test_max_game_recovery_lookback_custom() {
+        let mut cli = minimal_cli();
+        cli.proposer.max_game_recovery_lookback = 10000;
+        let config = ProposerConfig::from_cli(cli).unwrap();
+        assert_eq!(config.max_game_recovery_lookback, 10000);
     }
 }

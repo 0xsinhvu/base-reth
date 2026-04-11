@@ -1,5 +1,3 @@
-#[cfg(feature = "metrics")]
-use std::time::Instant;
 use std::time::SystemTime;
 
 use alloy_consensus::Block;
@@ -14,7 +12,6 @@ use base_consensus_genesis::RollupConfig;
 use libp2p::gossipsub::MessageAcceptance;
 
 use super::BlockHandler;
-#[cfg(feature = "metrics")]
 use crate::Metrics;
 
 /// Error that can occur when validating a block.
@@ -101,7 +98,7 @@ impl BlockHandler {
     pub const SEEN_HASH_CACHE_SIZE: usize = 1_000;
 
     /// The maximum number of blocks to keep per height.
-    /// This value is chosen according to the optimism specs:
+    /// This value is chosen according to the Base specs:
     /// <https://specs.optimism.io/protocol/rollup-node-p2p.html#block-validation>
     const MAX_BLOCKS_TO_KEEP: usize = 5;
 
@@ -116,70 +113,46 @@ impl BlockHandler {
         &mut self,
         envelope: &OpNetworkPayloadEnvelope,
     ) -> Result<(), BlockInvalidError> {
-        // Start timing for the validation duration
-        #[cfg(feature = "metrics")]
-        let validation_start = Instant::now();
-
         // Record total validation attempts
-        #[cfg(feature = "metrics")]
-        base_macros::inc!(counter, Metrics::BLOCK_VALIDATION_TOTAL);
+        Metrics::block_validation_total().increment(1);
 
         // Record block version distribution
-        #[cfg(feature = "metrics")]
-        {
-            let version = match &envelope.payload {
-                OpExecutionPayload::V1(_) => "v1",
-                OpExecutionPayload::V2(_) => "v2",
-                OpExecutionPayload::V3(_) => "v3",
-                OpExecutionPayload::V4(_) => "v4",
-            };
-            base_macros::inc!(counter, Metrics::BLOCK_VERSION, "version" => version);
-        }
+        let version = match &envelope.payload {
+            OpExecutionPayload::V1(_) => "v1",
+            OpExecutionPayload::V2(_) => "v2",
+            OpExecutionPayload::V3(_) => "v3",
+            OpExecutionPayload::V4(_) => "v4",
+        };
+        Metrics::block_version(version).increment(1);
 
-        let validation_result = self.validate_block_internal(envelope);
-
-        // Record validation duration
-        #[cfg(feature = "metrics")]
-        {
-            let duration = validation_start.elapsed();
-            base_macros::record!(
-                histogram,
-                Metrics::BLOCK_VALIDATION_DURATION_SECONDS,
-                duration.as_secs_f64()
-            );
-        }
+        let validation_result =
+            base_metrics::time!(Metrics::block_validation_duration_seconds(), {
+                self.validate_block_internal(envelope)
+            });
 
         // Record success/failure metrics
         match &validation_result {
             Ok(()) => {
-                #[cfg(feature = "metrics")]
-                base_macros::inc!(counter, Metrics::BLOCK_VALIDATION_SUCCESS);
+                Metrics::block_validation_success().increment(1);
             }
-            Err(_err) => {
-                #[cfg(feature = "metrics")]
-                {
-                    let reason = match _err {
-                        BlockInvalidError::Timestamp { current, received } => {
-                            if *received > *current + 5 {
-                                "timestamp_future"
-                            } else {
-                                "timestamp_past"
-                            }
-                        }
-                        BlockInvalidError::BlockHash { .. } => "invalid_hash",
-                        BlockInvalidError::Signature => "invalid_signature",
-                        BlockInvalidError::Signer { .. } => "invalid_signer",
-                        BlockInvalidError::TooManyBlocks { .. } => "too_many_blocks",
-                        BlockInvalidError::BlockSeen { .. } => "block_seen",
-                        BlockInvalidError::InvalidBlock(_)
-                        | BlockInvalidError::BaseFeePerGasOverflow(_) => "invalid_block",
-                        BlockInvalidError::ParentBeaconRoot => "parent_beacon_root",
-                        BlockInvalidError::BlobGasUsed => "blob_gas_used",
-                        BlockInvalidError::ExcessBlobGas => "excess_blob_gas",
-                        BlockInvalidError::WithdrawalsRoot => "withdrawals_root",
-                    };
-                    base_macros::inc!(counter, Metrics::BLOCK_VALIDATION_FAILED, "reason" => reason);
-                }
+            Err(err) => {
+                let reason = match err {
+                    BlockInvalidError::Timestamp { current, received } => {
+                        if *received > *current + 5 { "timestamp_future" } else { "timestamp_past" }
+                    }
+                    BlockInvalidError::BlockHash { .. } => "invalid_hash",
+                    BlockInvalidError::Signature => "invalid_signature",
+                    BlockInvalidError::Signer { .. } => "invalid_signer",
+                    BlockInvalidError::TooManyBlocks { .. } => "too_many_blocks",
+                    BlockInvalidError::BlockSeen { .. } => "block_seen",
+                    BlockInvalidError::InvalidBlock(_)
+                    | BlockInvalidError::BaseFeePerGasOverflow(_) => "invalid_block",
+                    BlockInvalidError::ParentBeaconRoot => "parent_beacon_root",
+                    BlockInvalidError::BlobGasUsed => "blob_gas_used",
+                    BlockInvalidError::ExcessBlobGas => "excess_blob_gas",
+                    BlockInvalidError::WithdrawalsRoot => "withdrawals_root",
+                };
+                Metrics::block_validation_failed(reason).increment(1);
             }
         }
 
@@ -457,11 +430,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -485,11 +458,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -513,11 +486,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -541,11 +514,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -566,11 +539,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -594,11 +567,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -648,11 +621,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -681,7 +654,7 @@ pub(crate) mod tests {
 
         let (_, unsafe_signer) = tokio::sync::watch::channel(Address::default());
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -705,11 +678,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: Some(B256::ZERO),
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -727,11 +700,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: Some(B256::ZERO),
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -752,11 +725,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -782,11 +755,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -812,11 +785,11 @@ pub(crate) mod tests {
             ),
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -844,11 +817,11 @@ pub(crate) mod tests {
             ),
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -875,11 +848,11 @@ pub(crate) mod tests {
             ),
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -923,11 +896,11 @@ pub(crate) mod tests {
             ),
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -956,11 +929,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 
@@ -997,11 +970,11 @@ pub(crate) mod tests {
             parent_beacon_block_root: None,
         };
 
-        let msg = envelope.payload_hash.signature_message(10);
+        let msg = envelope.payload_hash.signature_message(8453);
         let signer = envelope.signature.recover_address_from_prehash(&msg).unwrap();
         let (_, unsafe_signer) = tokio::sync::watch::channel(signer);
         let mut handler = BlockHandler::new(
-            RollupConfig { l2_chain_id: Chain::optimism_mainnet(), ..Default::default() },
+            RollupConfig { l2_chain_id: Chain::base_mainnet(), ..Default::default() },
             unsafe_signer,
         );
 

@@ -1,12 +1,13 @@
 #![doc = include_str!("../README.md")]
 #![doc(
     html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
-    html_favicon_url = "https://avatars0.githubusercontent.com/u/97369466?s=256",
-    issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    issue_tracker_base_url = "https://github.com/base/base/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod config;
 pub mod debug;
 pub mod engine;
 pub mod error;
@@ -17,6 +18,7 @@ pub mod sequencer;
 pub mod state;
 pub mod witness;
 
+pub use config::{BaseEthConfigApiServer, BaseEthConfigHandler};
 #[cfg(feature = "client")]
 pub use engine::OpEngineApiClient;
 pub use engine::{OP_ENGINE_CAPABILITIES, OpEngineApi, OpEngineApiServer};

@@ -12,7 +12,7 @@ to builder nodes via a custom RPC, replacing P2P propagation.
 └──────────────────┘               └──────────────────┘              └──────────────────┘
         │                                   │                                │
         │ reads from                        │ batches txs                    │ receives via
-        │ best_transactions()               │ sends via RPC                  │ base_insertValidatedTransactions
+        │ best_transactions()               │ sends via RPC                  │ base_insertValidatedTransaction
         ▼                                   ▼                                ▼
 ┌──────────────────┐               ┌──────────────────┐              ┌──────────────────┐
 │ Transaction Pool │               │ Builder RPC URL  │              │ Builder Mempool  │
@@ -120,23 +120,18 @@ RPC endpoint on builder nodes to receive forwarded transactions.
 ```rust
 #[rpc(server, namespace = "base")]
 pub trait BaseTxApi {
-    #[method(name = "insertValidatedTransactions")]
-    async fn insert_validated_transactions(
+    #[method(name = "insertValidatedTransaction")]
+    async fn insert_validated_transaction(
         &self,
-        txs: Vec<Bytes>,
-    ) -> RpcResult<ReceiveTxsResponse>;
+        txs: Bytes,
+    ) -> RpcResult<()>;
 }
 ```
 
 ### Response
 
-```rust
-pub struct ReceiveTxsResponse {
-    pub accepted: u64,
-    pub rejected: u64,
-    pub errors: Vec<TxRejection>,
-}
-```
+- Returns Ok(()) if it was able to successfully decode the tx bytes and insert to its local txpool
+- Returns Err(ErrorObjectOwned) if the tx was rejected by the txpool if it's no longer valid.
 
 ### Dependencies
 
@@ -155,10 +150,10 @@ Wires consumer + forwarder into the node using the `BaseNodeExtension` pattern.
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--enable-tx-forwarding` | bool | false | Enable the forwarding pipeline |
-| `--builder-rpc-urls` | Vec\<String\> | Required | Builder RPC endpoints (one forwarder per URL) |
+| `--builder-rpc-urls` | Vec<Url> | Required | Builder RPC endpoints (one forwarder per URL) |
 | `--tx-forwarding-resend-after-ms` | u64 | 4000 | Resend-after window in ms (default: 2 blocks) |
 | `--tx-forwarding-batch-size` | usize | 100 | Forwarder batch size |
-| `--tx-forwarding-batch-timeout-ms` | u64 | 50 | Batch timeout in ms |
+| `--tx-forwarding-max-rps` | u32 | 200 | Maximum RPC requests per second per forwarder |
 
 ### Extension Pattern
 

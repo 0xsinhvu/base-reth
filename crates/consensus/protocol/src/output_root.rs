@@ -77,7 +77,7 @@ impl OutputRoot {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_primitives::{B256, Bytes, b256, bytes};
 
     use super::OutputRoot;

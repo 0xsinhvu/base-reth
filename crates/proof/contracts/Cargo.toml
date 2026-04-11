@@ -1,6 +1,6 @@
 [package]
 name = "base-proof-contracts"
-description = "Shared onchain contract bindings for OP Stack dispute game management"
+description = "Shared onchain contract bindings for Base dispute game management"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,12 +13,13 @@ workspace = true
 
 [dependencies]
 # Alloy
-alloy-primitives.workspace = true
-alloy-sol-types.workspace = true
-alloy-contract.workspace = true
 alloy-provider.workspace = true
+alloy-contract.workspace = true
+alloy-sol-types.workspace = true
+alloy-primitives.workspace = true
 
 # Async
+futures.workspace = true
 async-trait.workspace = true
 
 # Tracing

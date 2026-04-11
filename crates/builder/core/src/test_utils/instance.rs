@@ -10,12 +10,13 @@ use std::sync::{Arc, LazyLock};
 
 use alloy_primitives::B256;
 use alloy_provider::{Identity, ProviderBuilder, RootProvider};
+use async_trait::async_trait;
 use base_alloy_flashblocks::FlashblocksPayloadV1;
 use base_alloy_network::Base;
 use base_execution_chainspec::OpChainSpec;
 use base_execution_rpc::OpEthApiBuilder;
 use base_node_core::{OpEngineValidatorBuilder, args::RollupArgs, node::OpPoolBuilder};
-use base_node_runner::BaseNode;
+use base_node_runner::{BaseNode, test_utils::init_silenced_tracing};
 use base_txpool::BasePooledTransaction;
 use futures::{FutureExt, StreamExt};
 use nanoid::nanoid;
@@ -65,8 +66,37 @@ pub struct LocalInstance {
     runtime: Option<Runtime>,
     exit_future: NodeExitFuture,
     _node_handle: Box<dyn Any + Send>,
+    pool_handle: Arc<dyn ExternalTransactionPool>,
     pool_observer: TransactionPoolObserver,
     metering_provider: SharedMeteringProvider,
+}
+
+struct PoolHandle<P> {
+    pool: P,
+}
+
+impl<P: core::fmt::Debug> core::fmt::Debug for PoolHandle<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PoolHandle").field("pool", &self.pool).finish()
+    }
+}
+
+#[async_trait]
+pub trait ExternalTransactionPool: Send + Sync + core::fmt::Debug {
+    async fn add_external_transaction(&self, tx: BasePooledTransaction) -> eyre::Result<()>;
+}
+
+#[async_trait]
+impl<P> ExternalTransactionPool for PoolHandle<P>
+where
+    P: TransactionPool<Transaction = BasePooledTransaction> + Send + Sync + core::fmt::Debug,
+{
+    async fn add_external_transaction(&self, tx: BasePooledTransaction) -> eyre::Result<()> {
+        TransactionPool::add_external_transaction(&self.pool, tx)
+            .await
+            .map(|_| ())
+            .map_err(|err| eyre::eyre!("pool rejected transaction: {err}"))
+    }
 }
 
 impl LocalInstance {
@@ -89,12 +119,15 @@ impl LocalInstance {
         node_config: NodeConfig<OpChainSpec>,
     ) -> eyre::Result<Self> {
         clear_otel_env_vars();
+        init_silenced_tracing();
         let runtime = RuntimeBuilder::new(RuntimeConfig::default()).build()?;
         let base_node = BaseNode::new(RollupArgs::default());
 
         let (rpc_ready_tx, rpc_ready_rx) = oneshot::channel::<()>();
         let (txpool_ready_tx, txpool_ready_rx) =
             oneshot::channel::<AllTransactionsEvents<BasePooledTransaction>>();
+        let (pool_handle_tx, pool_handle_rx) =
+            oneshot::channel::<Arc<dyn ExternalTransactionPool>>();
 
         let da_config = builder_config.da_config.clone();
         let gas_limit_config = builder_config.gas_limit_config.clone();
@@ -127,6 +160,10 @@ impl LocalInstance {
                     .send(ctx.pool.all_transactions_event_listener())
                     .expect("Failed to send txpool ready signal");
 
+                let pool_handle: Arc<dyn ExternalTransactionPool> =
+                    Arc::new(PoolHandle { pool: ctx.pool });
+                pool_handle_tx.send(pool_handle).expect("Failed to send pool handle");
+
                 Ok(())
             });
 
@@ -138,12 +175,14 @@ impl LocalInstance {
         // Wait for all required components to be ready
         rpc_ready_rx.await.expect("Failed to receive ready signal");
         let pool_monitor = txpool_ready_rx.await.expect("Failed to receive txpool ready signal");
+        let pool_handle = pool_handle_rx.await.expect("Failed to receive pool handle");
 
         Ok(Self {
             builder_config,
             node_config,
             exit_future,
             _node_handle: node_handle,
+            pool_handle,
             runtime: Some(runtime),
             pool_observer: TransactionPoolObserver::new(pool_monitor),
             metering_provider,
@@ -166,13 +205,13 @@ impl LocalInstance {
     }
 
     pub fn flashblocks_ws_url(&self) -> String {
-        let ipaddr = self.builder_config.flashblocks.ws_addr.ip();
+        let ipaddr = self.builder_config.flashblocks_ws_addr.ip();
         let ipaddr = if ipaddr.is_unspecified() {
             std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)
         } else {
             ipaddr
         };
-        let port = self.builder_config.flashblocks.ws_addr.port();
+        let port = self.builder_config.flashblocks_ws_addr.port();
         format!("ws://{ipaddr}:{port}/")
     }
 
@@ -194,6 +233,10 @@ impl LocalInstance {
 
     pub const fn pool(&self) -> &TransactionPoolObserver {
         &self.pool_observer
+    }
+
+    pub fn pool_handle(&self) -> Arc<dyn ExternalTransactionPool> {
+        Arc::clone(&self.pool_handle)
     }
 
     pub fn metering_provider(&self) -> &SharedMeteringProvider {
@@ -235,12 +278,45 @@ impl Future for LocalInstance {
 }
 
 pub fn default_node_config() -> NodeConfig<OpChainSpec> {
+    node_config_with_chain_spec(chain_spec())
+}
+
+fn chain_spec() -> Arc<OpChainSpec> {
+    static CHAIN_SPEC: LazyLock<Arc<OpChainSpec>> = LazyLock::new(|| {
+        let genesis = include_str!("./artifacts/genesis.json.tmpl");
+        let genesis = serde_json::from_str(genesis).expect("invalid genesis JSON");
+        let chain_spec = OpChainSpec::from_genesis(genesis);
+        Arc::new(chain_spec)
+    });
+
+    CHAIN_SPEC.clone()
+}
+
+/// Returns a chain spec identical to the default test chain spec but with
+/// `BaseUpgrade::V1` activated at genesis (timestamp 0).
+pub fn chain_spec_with_base_v1() -> Arc<OpChainSpec> {
+    use base_alloy_chains::BaseUpgrade;
+    use reth_chainspec::ForkCondition;
+
+    let genesis = include_str!("./artifacts/genesis.json.tmpl");
+    let genesis = serde_json::from_str(genesis).expect("invalid genesis JSON");
+    let mut spec = OpChainSpec::from_genesis(genesis);
+    spec.inner.hardforks.insert(BaseUpgrade::V1, ForkCondition::Timestamp(0));
+    Arc::new(spec)
+}
+
+/// Returns a node config using a chain spec with `BaseUpgrade::V1` activated
+/// at genesis.
+pub fn default_node_config_with_base_v1() -> NodeConfig<OpChainSpec> {
+    node_config_with_chain_spec(chain_spec_with_base_v1())
+}
+
+fn node_config_with_chain_spec(spec: Arc<OpChainSpec>) -> NodeConfig<OpChainSpec> {
     let tempdir = std::env::temp_dir();
     let random_id = nanoid!();
 
     let data_path = tempdir.join(format!("rbuilder.{random_id}.datadir"));
     let rocksdb_path = tempdir.join(format!("rbuilder.{random_id}.rocksdb"));
-
     let pprof_dumps_path = tempdir.join(format!("rbuilder.{random_id}.pprof-dumps"));
 
     std::fs::create_dir_all(&data_path).expect("Failed to create temporary data directory");
@@ -249,7 +325,6 @@ pub fn default_node_config() -> NodeConfig<OpChainSpec> {
         .expect("Failed to create temporary pprof dumps directory");
 
     let rpc_ipc_path = tempdir.join(format!("rbuilder.{random_id}.rpc-ipc"));
-
     let auth_ipc_path = tempdir.join(format!("rbuilder.{random_id}.auth-ipc"));
 
     let mut rpc = RpcServerArgs::default().with_auth_ipc();
@@ -269,21 +344,10 @@ pub fn default_node_config() -> NodeConfig<OpChainSpec> {
         pprof_dumps_path: Some(pprof_dumps_path),
     };
 
-    NodeConfig::<OpChainSpec>::new(chain_spec())
+    NodeConfig::<OpChainSpec>::new(spec)
         .with_datadir_args(datadir)
         .with_rpc(rpc)
         .with_network(network)
-}
-
-fn chain_spec() -> Arc<OpChainSpec> {
-    static CHAIN_SPEC: LazyLock<Arc<OpChainSpec>> = LazyLock::new(|| {
-        let genesis = include_str!("./artifacts/genesis.json.tmpl");
-        let genesis = serde_json::from_str(genesis).expect("invalid genesis JSON");
-        let chain_spec = OpChainSpec::from_genesis(genesis);
-        Arc::new(chain_spec)
-    });
-
-    CHAIN_SPEC.clone()
 }
 
 fn pool_component() -> OpPoolBuilder<BasePooledTransaction> {

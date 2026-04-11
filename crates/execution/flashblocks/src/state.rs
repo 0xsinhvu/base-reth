@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use alloy_consensus::Header;
 use arc_swap::{ArcSwapOption, Guard};
+use base_alloy_chains::BaseUpgrades;
+use base_alloy_consensus::OpBlock;
 use base_alloy_flashblocks::Flashblock;
-use base_execution_forks::OpHardforks;
-use base_execution_primitives::OpBlock;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_primitives::RecoveredBlock;
 use reth_provider::{BlockReaderIdExt, StateProviderFactory};
@@ -60,7 +60,22 @@ impl FlashblocksState {
     pub fn start<Client>(&self, client: Client)
     where
         Client: StateProviderFactory
-            + ChainSpecProvider<ChainSpec: EthChainSpec<Header = Header> + OpHardforks>
+            + ChainSpecProvider<ChainSpec: EthChainSpec<Header = Header> + BaseUpgrades>
+            + BlockReaderIdExt<Header = Header>
+            + Clone
+            + 'static,
+    {
+        self.start_with_options(client, false);
+    }
+
+    /// Starts the flashblocks state processor with per-transaction state root simulation.
+    ///
+    /// When `simulate_state_root` is true, the processor computes a state root after
+    /// each non-deposit transaction, storing the timing for metering purposes.
+    pub fn start_with_options<Client>(&self, client: Client, simulate_state_root: bool)
+    where
+        Client: StateProviderFactory
+            + ChainSpecProvider<ChainSpec: EthChainSpec<Header = Header> + BaseUpgrades>
             + BlockReaderIdExt<Header = Header>
             + Clone
             + 'static,
@@ -69,6 +84,7 @@ impl FlashblocksState {
             client,
             Arc::clone(&self.pending_blocks),
             self.max_pending_blocks_depth,
+            simulate_state_root,
             Arc::clone(&self.rx),
             self.flashblock_sender.clone(),
         );

@@ -80,7 +80,7 @@ pub struct ChainConfig {
     /// Hardfork Config. These values may override the superchain-wide defaults.
     #[cfg_attr(feature = "serde", serde(rename = "hardfork_configuration", alias = "hardforks"))]
     pub hardfork_config: HardForkConfig,
-    /// Optimism configuration
+    /// Base fee configuration
     #[cfg_attr(feature = "serde", serde(rename = "optimism"))]
     pub optimism: Option<BaseFeeConfig>,
     /// Chain-specific genesis information
@@ -115,7 +115,7 @@ impl ChainConfig {
         self.optimism.as_ref().map(|op| *op).unwrap_or_else(|| base_fee_config(self.chain_id))
     }
 
-    /// Loads the rollup config for the OP-Stack chain given the chain config and address list.
+    /// Loads the rollup config for the Base chain given the chain config and address list.
     pub fn as_rollup_config(&self) -> RollupConfig {
         RollupConfig {
             genesis: self.genesis,

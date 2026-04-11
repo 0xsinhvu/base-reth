@@ -12,7 +12,7 @@ use crate::{
     transaction::{OpDepositInfo, OpTransactionInfo},
 };
 
-/// The Ethereum [EIP-2718] Transaction Envelope, modified for OP Stack chains.
+/// The Ethereum [EIP-2718] Transaction Envelope, modified for Base.
 ///
 /// # Note:
 ///
@@ -44,7 +44,7 @@ pub enum OpTxEnvelope {
     Deposit(Sealed<TxDeposit>),
 }
 
-/// Represents a transaction envelope for OP chains.
+/// Represents a transaction envelope for Base chains.
 ///
 /// Compared to Ethereum it can tell whether the transaction is a deposit.
 pub trait OpTransaction {

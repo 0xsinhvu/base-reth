@@ -8,12 +8,12 @@ no_std_packages=(
   # alloy crates (ported from op-alloy)
   base-alloy-consensus
   base-alloy-evm
-  base-alloy-hardforks
+  base-alloy-chains
   base-alloy-rpc-types
   base-alloy-rpc-types-engine
 
   # consensus protocol crates
-  base-macros
+  base-metrics
   base-consensus-genesis
   base-consensus-upgrades
   base-consensus-registry
@@ -25,7 +25,7 @@ no_std_packages=(
 )
 
 for package in "${no_std_packages[@]}"; do
-  cmd="cargo build -p $package --target riscv32imac-unknown-none-elf --no-default-features"
+  cmd="cargo build --locked -p $package --target riscv32imac-unknown-none-elf --no-default-features"
   if [ -n "$CI" ]; then
     echo "::group::$cmd"
   else

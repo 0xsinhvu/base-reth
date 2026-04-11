@@ -2,7 +2,7 @@
 
 A library to build and process Flashblock-level Access Lists (FBALs).
 
-See the [spec](../../../docs/specs/access-lists.md) for more details.
+See the [spec](../../../docs/specs/pages/protocol/access-lists.md) for more details.
 
 ## Overview
 
@@ -42,3 +42,7 @@ let access_list = builder.build(0, max_tx_index);
 - Tracks storage slot reads and writes
 - Associates each change with its transaction index
 - Produces RLP-encodable access lists with a commitment hash
+
+## License
+
+Licensed under the [MIT License](https://github.com/base/base/blob/main/LICENSE).

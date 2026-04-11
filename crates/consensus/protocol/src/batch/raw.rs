@@ -95,7 +95,7 @@ impl RawSpanBatch {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_primitives::FixedBytes;
 
     use super::*;

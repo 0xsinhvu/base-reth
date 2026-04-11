@@ -14,12 +14,12 @@ use base_consensus_derive::{
 use base_consensus_genesis::{L1ChainConfig, RollupConfig, SystemConfig};
 use base_proof_driver::{DriverPipeline, PipelineCursor};
 use base_proof_executor::TrieDBProvider;
-use base_proof_preimage::CommsClient;
+use base_proof_preimage::{CommsClient, FlushableCache};
 use base_protocol::{BlockInfo, L2BlockInfo, OpAttributesWithParent};
 use spin::RwLock;
 
 use crate::{
-    FlushableCache, OracleBlobProvider, OracleL1ChainProvider, OracleL2ChainProvider,
+    OracleBlobProvider, OracleL1ChainProvider, OracleL2ChainProvider,
     boot::BootInfo,
     sync::{SafeHeadFetcher, new_oracle_pipeline_cursor},
 };
@@ -137,9 +137,14 @@ where
 
         let safe_header = l2_provider.header_by_hash(l2_head_hash)?.seal_slow();
 
-        let cursor =
-            new_oracle_pipeline_cursor(&cfg, safe_header, &mut l1_provider, &mut l2_provider)
-                .await?;
+        let cursor = new_oracle_pipeline_cursor(
+            &cfg,
+            safe_header,
+            boot_info.agreed_l2_output_root,
+            &mut l1_provider,
+            &mut l2_provider,
+        )
+        .await?;
         l2_provider.set_cursor(Arc::clone(&cursor));
 
         let pipeline = Self::new(

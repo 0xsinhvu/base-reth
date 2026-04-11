@@ -2,7 +2,7 @@
 
 <a href="https://crates.io/crates/base-consensus-engine"><img src="https://img.shields.io/crates/v/base-consensus-engine.svg?label=base-consensus-engine&labelColor=2a2f35" alt="base-consensus-engine"></a>
 
-An extensible implementation of the [OP Stack][op-stack] rollup node engine client.
+An extensible implementation of the [Base][base-specs] rollup node engine client.
 
 ## Overview
 
@@ -22,7 +22,20 @@ The `base-consensus-engine` crate provides a task-based engine client for intera
 
 ## Architecture
 
-The engine implements a task-driven architecture where forkchoice synchronization is handled automatically:
+The engine implements a task-driven architecture where operations are queued and executed atomically:
+
+```text
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│   Engine    │◄───┤  Task Queue  │◄───┤  Engine     │
+│   Client    │    │   (Priority) │    │  Tasks      │
+└─────────────┘    └──────────────┘    └─────────────┘
+       │                   │                   │
+       ▼                   ▼                   ▼
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│ Engine API  │    │ Engine State │    │  Rollup     │
+│ (HTTP/JWT)  │    │   Updates    │    │  Config     │
+└─────────────┘    └──────────────┘    └─────────────┘
+```
 
 - **Automatic Forkchoice Handling**: The [`BuildTask`](crate::BuildTask) automatically performs forkchoice updates during block building, eliminating the need for explicit forkchoice management in user code.
 - **Internal Synchronization**: [`SynchronizeTask`](crate::SynchronizeTask) handles internal execution layer synchronization and is primarily used by other tasks rather than directly by users.
@@ -36,12 +49,48 @@ The crate supports multiple Engine API versions with automatic version selection
 - **Engine New Payload**: V2, V3, V4
 - **Engine Get Payload**: V2, V3, V4
 
-Version selection follows Optimism hardfork activation times (Bedrock, Canyon, Delta, Ecotone, Isthmus).
+Version selection follows Base hardfork activation times (Bedrock, Canyon, Delta, Ecotone, Isthmus).
 
 ## Features
 
 - `metrics` - Enable Prometheus metrics collection (optional)
 
+## Module Organization
+
+- **Task Queue** - Core engine task queue and execution logic via [`Engine`](crate::Engine)
+- **Client** - HTTP client for Engine API communication via [`EngineClient`](crate::EngineClient)
+- **State** - Engine state management and synchronization via [`EngineState`](crate::EngineState)
+- **Versions** - Engine API version selection via [`EngineForkchoiceVersion`](crate::EngineForkchoiceVersion),
+  [`EngineNewPayloadVersion`](crate::EngineNewPayloadVersion), [`EngineGetPayloadVersion`](crate::EngineGetPayloadVersion)
+- **Attributes** - Payload attribute validation via [`AttributesMatch`](crate::AttributesMatch)
+- **Kinds** - Engine client type identification via [`EngineKind`](crate::EngineKind)
+- **Query** - Engine query interface via [`EngineQueries`](crate::EngineQueries)
+- **Metrics** - Optional Prometheus metrics collection via [`Metrics`](crate::Metrics)
+
 <!-- Hyper Links -->
 
-[op-stack]: https://specs.optimism.io
+[base-specs]: https://specs.base.org
+
+## Usage
+
+Add the dependency to your `Cargo.toml`:
+
+```toml
+[dependencies]
+base-consensus-engine = { workspace = true }
+```
+
+Submit engine tasks via the `Engine`:
+
+```rust,ignore
+use base_consensus_engine::{Engine, EngineClient, InsertTask};
+
+let client = EngineClient::new(engine_url, jwt_secret)?;
+let engine = Engine::new(client, rollup_config);
+
+engine.submit(InsertTask::new(payload)).await?;
+```
+
+## License
+
+Licensed under the [MIT License](https://github.com/base/base/blob/main/LICENSE).

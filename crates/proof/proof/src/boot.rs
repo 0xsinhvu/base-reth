@@ -1,7 +1,7 @@
 //! This module contains the prologue phase of the client program, pulling in the boot information
 //! through the `PreimageOracle` ABI as local keys.
 
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use base_consensus_genesis::{L1ChainConfig, RollupConfig};
 use base_consensus_registry::Registry;
 use base_proof_preimage::{PreimageKey, PreimageOracleClient};
@@ -57,6 +57,27 @@ pub const L2_ROLLUP_CONFIG_KEY: U256 = U256::from_be_slice(&[6]);
 /// the preimage oracle when no hardcoded configuration is available for the
 /// given chain ID. Oracle-loaded configs require additional validation.
 pub const L1_CONFIG_KEY: U256 = U256::from_be_slice(&[7]);
+
+/// The local key identifier for the proposer address.
+///
+/// This key retrieves the address of the proposer that will submit the proof
+/// transaction on-chain. The enclave includes this address in the proof journal
+/// so on-chain verification can match it against the actual `msg.sender`.
+pub const PROPOSER_KEY: U256 = U256::from_be_slice(&[8]);
+
+/// The local key identifier for the intermediate block interval.
+///
+/// This key retrieves the number of L2 blocks between intermediate output root
+/// checkpoints. The enclave uses this to sample the correct intermediate roots
+/// when constructing the aggregate proof journal, matching the on-chain
+/// `AggregateVerifier`'s `INTERMEDIATE_BLOCK_INTERVAL`.
+pub const INTERMEDIATE_BLOCK_INTERVAL_KEY: U256 = U256::from_be_slice(&[9]);
+
+/// The local key identifier for the L1 head block number.
+///
+/// This key retrieves the block number corresponding to `L1_HEAD_KEY`, allowing
+/// the enclave to reference the L1 head number without an extra lookup.
+pub const L1_HEAD_NUMBER_KEY: U256 = U256::from_be_slice(&[10]);
 
 /// The boot information for the client program.
 ///
@@ -132,6 +153,27 @@ pub struct BootInfo {
     ///
     /// **Security**: Loaded from registry (secure) or oracle (requires validation).
     pub l1_config: L1ChainConfig,
+    /// The proposer address that will submit the proof transaction on-chain.
+    ///
+    /// Included in the proof journal so on-chain verification can match it against
+    /// the actual `msg.sender` (gameCreator). Defaults to `Address::ZERO` when not set.
+    ///
+    /// **Security**: User-submitted input; the on-chain contract validates that the
+    /// transaction sender matches this value.
+    #[serde(default)]
+    pub proposer: Address,
+    /// The number of L2 blocks between intermediate output root checkpoints.
+    ///
+    /// Used by the enclave to sample the correct intermediate roots when
+    /// constructing the aggregate proof journal. Defaults to 0 when not set.
+    #[serde(default)]
+    pub intermediate_block_interval: u64,
+    /// The block number of the L1 head.
+    ///
+    /// Stored alongside `l1_head` so the enclave can reference the L1 head
+    /// block number without an extra lookup. Defaults to 0 when not set.
+    #[serde(default)]
+    pub l1_head_number: u64,
 }
 
 impl BootInfo {
@@ -238,6 +280,55 @@ impl BootInfo {
             "Successfully loaded boot information"
         );
 
+        // Load proposer address (optional — defaults to zero for backwards compatibility).
+        let proposer = match oracle.get(PreimageKey::new_local(PROPOSER_KEY.to())).await {
+            Ok(bytes) => {
+                let buf: [u8; 20] =
+                    bytes.as_slice().try_into().map_err(OracleProviderError::SliceConversion)?;
+                Address::from(buf)
+            }
+            Err(e) => {
+                debug!(
+                    target: "boot_loader",
+                    error = %e,
+                    "Proposer preimage not found, defaulting to Address::ZERO"
+                );
+                Address::ZERO
+            }
+        };
+
+        // Load intermediate block interval (optional — defaults to 0 for backwards compatibility).
+        let intermediate_block_interval =
+            match oracle.get(PreimageKey::new_local(INTERMEDIATE_BLOCK_INTERVAL_KEY.to())).await {
+                Ok(bytes) => u64::from_be_bytes(
+                    bytes.as_slice().try_into().map_err(OracleProviderError::SliceConversion)?,
+                ),
+                Err(e) => {
+                    debug!(
+                        target: "boot_loader",
+                        error = %e,
+                        "Intermediate block interval preimage not found, defaulting to 0"
+                    );
+                    0
+                }
+            };
+
+        // Load L1 head block number (optional — defaults to 0 for backwards compatibility).
+        let l1_head_number = match oracle.get(PreimageKey::new_local(L1_HEAD_NUMBER_KEY.to())).await
+        {
+            Ok(bytes) => u64::from_be_bytes(
+                bytes.as_slice().try_into().map_err(OracleProviderError::SliceConversion)?,
+            ),
+            Err(e) => {
+                debug!(
+                    target: "boot_loader",
+                    error = %e,
+                    "L1 head number preimage not found, defaulting to 0"
+                );
+                0
+            }
+        };
+
         Ok(Self {
             l1_head,
             agreed_l2_output_root: l2_output_root,
@@ -246,6 +337,9 @@ impl BootInfo {
             chain_id,
             rollup_config,
             l1_config,
+            proposer,
+            intermediate_block_interval,
+            l1_head_number,
         })
     }
 }

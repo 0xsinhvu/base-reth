@@ -1,10 +1,10 @@
-//! [`PrecompileProvider`] for FPVM-accelerated OP Stack precompiles.
+//! [`PrecompileProvider`] for FPVM-accelerated Base precompiles.
 
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 use alloy_primitives::{Address, Bytes};
 use base_proof_preimage::{HintWriterClient, PreimageOracleClient};
-use base_revm::{OpSpecId, fjord, granite, isthmus, jovian};
+use base_revm::{BasePrecompiles, OpSpecId};
 use revm::{
     context::{Cfg, ContextTr, LocalContextTr},
     handler::{EthPrecompiles, PrecompileProvider},
@@ -35,6 +35,11 @@ where
     H: HintWriterClient + Clone + Send + Sync + 'static,
     O: PreimageOracleClient + Clone + Send + Sync + 'static,
 {
+    #[cfg(test)]
+    const fn precompiles(&self) -> &'static Precompiles {
+        self.inner.precompiles
+    }
+
     /// Create a new precompile provider with the given [`OpSpecId`].
     #[inline]
     pub fn new_with_spec(spec: OpSpecId, hint_writer: H, oracle_reader: O) -> Self {
@@ -43,10 +48,11 @@ where
             | OpSpecId::REGOLITH
             | OpSpecId::CANYON
             | OpSpecId::ECOTONE) => Precompiles::new(spec.into_eth_spec().into()),
-            OpSpecId::FJORD => fjord(),
-            OpSpecId::GRANITE | OpSpecId::HOLOCENE => granite(),
-            OpSpecId::ISTHMUS => isthmus(),
-            OpSpecId::OSAKA | OpSpecId::JOVIAN => jovian(),
+            OpSpecId::FJORD => BasePrecompiles::fjord(),
+            OpSpecId::GRANITE | OpSpecId::HOLOCENE => BasePrecompiles::granite(),
+            OpSpecId::ISTHMUS => BasePrecompiles::isthmus(),
+            OpSpecId::JOVIAN => BasePrecompiles::jovian(),
+            OpSpecId::BASE_V1 => BasePrecompiles::base_v1(),
         };
 
         let accelerated_precompiles = match spec {
@@ -56,7 +62,7 @@ where
             OpSpecId::ECOTONE | OpSpecId::FJORD => accelerated_ecotone::<H, O>(),
             OpSpecId::GRANITE | OpSpecId::HOLOCENE => accelerated_granite::<H, O>(),
             OpSpecId::ISTHMUS => accelerated_isthmus::<H, O>(),
-            OpSpecId::OSAKA | OpSpecId::JOVIAN => accelerated_jovian::<H, O>(),
+            OpSpecId::JOVIAN | OpSpecId::BASE_V1 => accelerated_jovian::<H, O>(),
         };
 
         Self {
@@ -287,4 +293,67 @@ where
     ));
 
     base
+}
+
+#[cfg(test)]
+mod tests {
+    use base_proof_preimage::{BidirectionalChannel, HintWriter, NativeChannel, OracleReader};
+    use base_revm::OpSpecId;
+    use revm::precompile::modexp;
+
+    use super::*;
+
+    fn make_hw_or() -> (HintWriter<NativeChannel>, OracleReader<NativeChannel>) {
+        let (hint_chan, preimage_chan) =
+            (BidirectionalChannel::new().unwrap(), BidirectionalChannel::new().unwrap());
+        (HintWriter::new(hint_chan.client), OracleReader::new(preimage_chan.client))
+    }
+
+    /// Builds a MODEXP input whose `base_len` exceeds the EIP-7823 limit.
+    fn oversized_modexp_input() -> Vec<u8> {
+        // EIP-7823 caps each of base_len/exp_len/mod_len at 1024 bytes.
+        let over = revm::primitives::eip7823::INPUT_SIZE_LIMIT + 1;
+        let encode = |len: usize| -> [u8; 32] {
+            let mut b = [0u8; 32];
+            b[24..].copy_from_slice(&(len as u64).to_be_bytes());
+            b
+        };
+        let mut input = Vec::with_capacity(96);
+        input.extend_from_slice(&encode(over));
+        input.extend_from_slice(&encode(0)); // exp_len = 0
+        input.extend_from_slice(&encode(1)); // mod_len = 1
+        input
+    }
+
+    #[test]
+    fn test_jovian_and_base_v1_use_different_precompile_sets() {
+        let (hw, or_) = make_hw_or();
+        let jovian = OpFpvmPrecompiles::new_with_spec(OpSpecId::JOVIAN, hw.clone(), or_.clone());
+        let base_v1 = OpFpvmPrecompiles::new_with_spec(OpSpecId::BASE_V1, hw, or_);
+
+        assert!(
+            !core::ptr::eq(jovian.precompiles(), base_v1.precompiles()),
+            "JOVIAN and BASE_V1 must resolve to different static precompile sets",
+        );
+    }
+
+    #[test]
+    fn test_base_v1_modexp_enforces_eip7823_size_limit() {
+        let (hw, or_) = make_hw_or();
+        let jovian = OpFpvmPrecompiles::new_with_spec(OpSpecId::JOVIAN, hw.clone(), or_.clone());
+        let base_v1 = OpFpvmPrecompiles::new_with_spec(OpSpecId::BASE_V1, hw, or_);
+
+        let modexp_berlin = modexp::BERLIN;
+        let addr = modexp_berlin.address();
+        let input = oversized_modexp_input();
+
+        assert!(
+            jovian.precompiles().get(addr).unwrap().execute(&input, u64::MAX).is_ok(),
+            "JOVIAN MODEXP must accept oversized input (Berlin pricing, no EIP-7823 limit)",
+        );
+        assert!(
+            base_v1.precompiles().get(addr).unwrap().execute(&input, u64::MAX).is_err(),
+            "BASE_V1 MODEXP must reject oversized input (Osaka pricing, EIP-7823 limit)",
+        );
+    }
 }

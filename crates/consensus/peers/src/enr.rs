@@ -1,10 +1,10 @@
-//! Contains the Optimism consensus-layer ENR Type.
+//! Contains the Base consensus-layer ENR Type.
 
 use alloy_rlp::{Decodable, Encodable};
 use discv5::Enr;
 use unsigned_varint::{decode, encode};
 
-/// Validates the [`Enr`] for the OP Stack.
+/// Validates the [`Enr`] for Base.
 #[derive(Debug, derive_more::Display, Clone, Default, PartialEq, Eq)]
 pub enum EnrValidation {
     /// Conversion error.
@@ -20,7 +20,7 @@ pub enum EnrValidation {
 }
 
 impl EnrValidation {
-    /// Validates the [`Enr`] for the OP Stack.
+    /// Validates the [`Enr`] for Base.
     pub fn validate(enr: &Enr, chain_id: u64) -> Self {
         let opstack_enr = match OpStackEnr::try_from(enr) {
             Ok(opstack_enr) => opstack_enr,
@@ -58,11 +58,11 @@ pub struct OpStackEnr {
 /// The error type that can be returned when trying to convert an [`Enr`] to an [`OpStackEnr`].
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum OpStackEnrError {
-    /// Missing OP Stack ENR key.
-    #[error("Missing OP Stack ENR key")]
+    /// Missing Base ENR key.
+    #[error("Missing Base ENR key")]
     MissingKey,
-    /// Failed to decode the OP Stack ENR Value.
-    #[error("Failed to decode the OP Stack ENR Value: {0}")]
+    /// Failed to decode the Base ENR Value.
+    #[error("Failed to decode the Base ENR Value: {0}")]
     DecodeError(String),
     /// Invalid version.
     #[error("Invalid version: {0}")]
@@ -143,33 +143,24 @@ mod tests {
     fn test_enr_validation() {
         let key = CombinedKey::generate_secp256k1();
         let mut enr = Enr::builder().build(&key).unwrap();
-        let op_stack_enr = OpStackEnr::from_chain_id(10);
+        let op_stack_enr = OpStackEnr::from_chain_id(8453);
         let mut op_stack_bytes = Vec::new();
         op_stack_enr.encode(&mut op_stack_bytes);
         enr.insert_raw_rlp(OpStackEnr::OP_CL_KEY, op_stack_bytes.into(), &key).unwrap();
-        assert!(EnrValidation::validate(&enr, 10).is_valid());
-        assert!(EnrValidation::validate(&enr, 11).is_invalid());
+        assert!(EnrValidation::validate(&enr, 8453).is_valid());
+        assert!(EnrValidation::validate(&enr, 84532).is_invalid());
     }
 
     #[test]
     fn test_enr_validation_invalid_version() {
         let key = CombinedKey::generate_secp256k1();
         let mut enr = Enr::builder().build(&key).unwrap();
-        let mut op_stack_enr = OpStackEnr::from_chain_id(10);
+        let mut op_stack_enr = OpStackEnr::from_chain_id(8453);
         op_stack_enr.version = 1;
         let mut op_stack_bytes = Vec::new();
         op_stack_enr.encode(&mut op_stack_bytes);
         enr.insert_raw_rlp(OpStackEnr::OP_CL_KEY, op_stack_bytes.into(), &key).unwrap();
-        assert!(EnrValidation::validate(&enr, 10).is_invalid());
-    }
-
-    #[test]
-    fn test_op_mainnet_enr() {
-        let op_enr = OpStackEnr::from_chain_id(10);
-        let bytes = alloy_rlp::encode(op_enr);
-        assert_eq!(Bytes::from(bytes.clone()), bytes!("820A00"));
-        let decoded = OpStackEnr::decode(&mut &bytes[..]).unwrap();
-        assert_eq!(decoded, op_enr);
+        assert!(EnrValidation::validate(&enr, 8453).is_invalid());
     }
 
     #[test]

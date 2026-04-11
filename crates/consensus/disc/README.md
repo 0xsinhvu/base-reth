@@ -1,13 +1,13 @@
 # `base-consensus-disc`
 
-Discovery service for the OP Stack.
+Discovery service for Base.
 
 This crate provides decentralized peer discovery capabilities using the Discv5 distributed
 hash table (DHT) protocol, as defined in the Ethereum networking specifications.
 
 ## Overview
 
-The discovery service enables OP Stack nodes to find and connect to other network
+The discovery service enables Base nodes to find and connect to other network
 participants without relying on centralized infrastructure. It maintains a local
 view of the network through ENRs (Ethereum Node Records) and facilitates peer
 connections for the gossip layer.
@@ -46,3 +46,28 @@ Key configuration parameters include:
 - Bootstrap node list
 - Storage location for persistent peer cache
 - Network interface and port bindings
+
+## Usage
+
+Add the dependency to your `Cargo.toml`:
+
+```toml
+[dependencies]
+base-consensus-disc = { workspace = true }
+```
+
+Construct and run the discovery service via `Discv5Builder`:
+
+```rust,ignore
+use base_consensus_disc::{Discv5Builder, LocalNode};
+
+let driver = Discv5Builder::new()
+    .with_local_node(local_node)
+    .build();
+
+driver.start().await?;
+```
+
+## License
+
+Licensed under the [MIT License](https://github.com/base/base/blob/main/LICENSE).

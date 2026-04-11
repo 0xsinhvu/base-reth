@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![doc(
     html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
     issue_tracker_base_url = "https://github.com/base/base/issues/"
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -24,8 +25,6 @@ mod noop;
 pub use noop::{NoopTrieHinter, NoopTrieProvider};
 
 mod util;
-// Re-export [alloy_trie::Nibbles].
-pub use alloy_trie::Nibbles;
 pub use util::ordered_trie_with_encoder;
 
 #[cfg(test)]

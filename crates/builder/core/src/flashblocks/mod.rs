@@ -15,11 +15,10 @@ pub use traits::PayloadBuilder;
 mod handler;
 pub use handler::PayloadHandler;
 
-mod config;
-pub use config::FlashblocksConfig;
-
 mod context;
-pub use context::{FlashblocksExtraCtx, OpPayloadBuilderCtx};
+pub use context::{
+    FlashblockDiagnostics, FlashblockSelectionOutcome, FlashblocksExtraCtx, OpPayloadBuilderCtx,
+};
 
 mod payload;
 pub use payload::FlashblocksExecutionInfo;

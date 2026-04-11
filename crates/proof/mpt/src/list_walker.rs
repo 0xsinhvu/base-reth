@@ -162,7 +162,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
     use alloy_consensus::{ReceiptEnvelope, TxEnvelope};

@@ -4,7 +4,8 @@ use alloc::{sync::Arc, vec};
 
 use alloy_chains::Chain;
 use alloy_primitives::{U256, b256};
-use base_execution_forks::{BASE_MAINNET_HARDFORKS, OpHardfork};
+use base_alloy_chains::{BaseChainConfig, BaseUpgrade};
+use base_execution_forks::BASE_MAINNET_HARDFORKS;
 use reth_chainspec::{BaseFeeParams, BaseFeeParamsKind, ChainSpec};
 use reth_ethereum_forks::{EthereumHardfork, Hardfork};
 use reth_primitives_traits::{SealedHeader, sync::LazyLock};
@@ -13,7 +14,7 @@ use crate::OpChainSpec;
 
 /// The Base mainnet spec
 pub static BASE_MAINNET: LazyLock<Arc<OpChainSpec>> = LazyLock::new(|| {
-    let genesis = serde_json::from_str(include_str!("../res/genesis/base.json"))
+    let genesis = serde_json::from_str(BaseChainConfig::mainnet().genesis_json)
         .expect("Can't deserialize Base genesis json");
     let hardforks = BASE_MAINNET_HARDFORKS.clone();
     OpChainSpec {
@@ -29,7 +30,7 @@ pub static BASE_MAINNET: LazyLock<Arc<OpChainSpec>> = LazyLock::new(|| {
             base_fee_params: BaseFeeParamsKind::Variable(
                 vec![
                     (EthereumHardfork::London.boxed(), BaseFeeParams::optimism()),
-                    (OpHardfork::Canyon.boxed(), BaseFeeParams::optimism_canyon()),
+                    (BaseUpgrade::Canyon.boxed(), BaseFeeParams::optimism_canyon()),
                 ]
                 .into(),
             ),

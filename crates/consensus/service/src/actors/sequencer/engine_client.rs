@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use alloy_rpc_types_engine::PayloadId;
 use async_trait::async_trait;
@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     EngineClientError, EngineClientResult,
-    actors::engine::{BuildRequest, EngineActorRequest, ResetRequest, SealRequest},
+    actors::engine::{BuildRequest, EngineActorRequest, GetPayloadRequest, ResetRequest},
 };
 
 /// Trait to be used by the Sequencer to interact with the engine, abstracting communication
@@ -29,18 +29,61 @@ pub trait SequencerEngineClient: Debug + Send + Sync {
         attributes: OpAttributesWithParent,
     ) -> EngineClientResult<PayloadId>;
 
-    /// Seals and canonicalizes a previously started block.
-    ///
-    /// Takes a `PayloadId` from a previous `start_build_block` call and returns
-    /// the finalized execution payload envelope.
-    async fn seal_and_canonicalize_block(
+    /// Fetches the sealed payload envelope from the engine WITHOUT inserting it.
+    /// Call this before attempting conductor commit, then call `insert_unsafe_payload` on success.
+    async fn get_sealed_payload(
         &self,
         payload_id: PayloadId,
         attributes: OpAttributesWithParent,
     ) -> EngineClientResult<OpExecutionPayloadEnvelope>;
 
+    /// Fire-and-forget: submits the sealed payload to the engine for insertion (`new_payload` + FCU).
+    /// Call this after a successful conductor commit.
+    async fn insert_unsafe_payload(
+        &self,
+        payload: OpExecutionPayloadEnvelope,
+    ) -> EngineClientResult<()>;
+
     /// Returns the current unsafe head [`L2BlockInfo`].
     async fn get_unsafe_head(&self) -> EngineClientResult<L2BlockInfo>;
+}
+
+/// Blanket implementation so [`Arc<T>`] can be used wherever `T: SequencerEngineClient`.
+///
+/// Both [`crate::SequencerActor`] and [`super::build::PayloadBuilder`] hold an
+/// `Arc` to the same engine client, so this impl allows both to call trait
+/// methods without any additional wrapping.
+#[async_trait]
+impl<T: SequencerEngineClient> SequencerEngineClient for Arc<T> {
+    async fn reset_engine_forkchoice(&self) -> EngineClientResult<()> {
+        (**self).reset_engine_forkchoice().await
+    }
+
+    async fn start_build_block(
+        &self,
+        attributes: OpAttributesWithParent,
+    ) -> EngineClientResult<PayloadId> {
+        (**self).start_build_block(attributes).await
+    }
+
+    async fn get_sealed_payload(
+        &self,
+        payload_id: PayloadId,
+        attributes: OpAttributesWithParent,
+    ) -> EngineClientResult<OpExecutionPayloadEnvelope> {
+        (**self).get_sealed_payload(payload_id, attributes).await
+    }
+
+    async fn insert_unsafe_payload(
+        &self,
+        payload: OpExecutionPayloadEnvelope,
+    ) -> EngineClientResult<()> {
+        (**self).insert_unsafe_payload(payload).await
+    }
+
+    async fn get_unsafe_head(&self) -> EngineClientResult<L2BlockInfo> {
+        (**self).get_unsafe_head().await
+    }
 }
 
 /// Queue-based implementation of the [`SequencerEngineClient`] trait. This handles all
@@ -73,7 +116,7 @@ impl SequencerEngineClient for QueuedSequencerEngineClient {
             .await
             .inspect(|_| info!(target: "sequencer", "Engine reset successfully."))
             .ok_or_else(|| {
-                error!(target: "block_engine", "Failed to receive built payload");
+                error!(target: "block_engine", "Failed to receive forkchoice reset result");
                 EngineClientError::ResponseError("response channel closed.".to_string())
             })?
     }
@@ -106,16 +149,16 @@ impl SequencerEngineClient for QueuedSequencerEngineClient {
         })
     }
 
-    async fn seal_and_canonicalize_block(
+    async fn get_sealed_payload(
         &self,
         payload_id: PayloadId,
         attributes: OpAttributesWithParent,
     ) -> EngineClientResult<OpExecutionPayloadEnvelope> {
         let (result_tx, mut result_rx) = mpsc::channel(1);
 
-        trace!(target: "sequencer", ?attributes, "Sending seal request to engine.");
+        trace!(target: "sequencer", ?attributes, "Sending get payload request to engine.");
         self.engine_actor_request_tx
-            .send(EngineActorRequest::SealRequest(Box::new(SealRequest {
+            .send(EngineActorRequest::GetPayloadRequest(Box::new(GetPayloadRequest {
                 payload_id,
                 attributes,
                 result_tx,
@@ -125,11 +168,11 @@ impl SequencerEngineClient for QueuedSequencerEngineClient {
 
         match result_rx.recv().await {
             Some(Ok(payload)) => {
-                trace!(target: "sequencer", ?payload, "Seal succeeded.");
+                trace!(target: "sequencer", ?payload, "Get payload succeeded.");
                 Ok(payload)
             }
             Some(Err(err)) => {
-                info!(target: "sequencer", ?err, "Seal failed.");
+                info!(target: "sequencer", ?err, "Get payload failed.");
                 Err(EngineClientError::SealError(err))
             }
             None => {
@@ -137,5 +180,16 @@ impl SequencerEngineClient for QueuedSequencerEngineClient {
                 Err(EngineClientError::ResponseError("response channel closed.".to_string()))
             }
         }
+    }
+
+    async fn insert_unsafe_payload(
+        &self,
+        payload: OpExecutionPayloadEnvelope,
+    ) -> EngineClientResult<()> {
+        trace!(target: "sequencer", "Sending insert unsafe payload request to engine.");
+        self.engine_actor_request_tx
+            .send(EngineActorRequest::ProcessUnsafeL2BlockRequest(Box::new(payload)))
+            .await
+            .map_err(|_| EngineClientError::RequestError("request channel closed.".to_string()))
     }
 }

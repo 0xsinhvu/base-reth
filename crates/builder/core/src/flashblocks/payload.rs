@@ -12,15 +12,16 @@ use alloy_eips::{Encodable2718, eip7685::EMPTY_REQUESTS_HASH, merge::BEACON_NONC
 use alloy_evm::Database;
 use alloy_primitives::{Address, B256, U256, map::foldhash::HashMap};
 use base_access_lists::{FlashblockAccessList, FlashblockAccessListBuilder};
+use base_alloy_chains::BaseUpgrades;
+use base_alloy_consensus::OpReceipt;
 use base_alloy_flashblocks::{
     ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, FlashblocksPayloadV1,
 };
 use base_builder_publish::WebSocketPublisher;
 use base_execution_consensus::{calculate_receipt_root_no_memo_optimism, isthmus};
 use base_execution_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
-use base_execution_forks::OpHardforks;
-use base_execution_primitives::{OpReceipt, OpTransactionSigned};
-use base_node_core::{OpBuiltPayload, OpPayloadBuilderAttributes};
+use base_execution_payload_builder::{OpBuiltPayload, OpPayloadBuilderAttributes};
+use base_execution_primitives::OpTransactionSigned;
 use either::Either;
 use eyre::WrapErr as _;
 use reth_basic_payload_builder::BuildOutcome;
@@ -41,16 +42,16 @@ use reth_transaction_pool::TransactionPool;
 use reth_trie::{HashedPostState, updates::TrieUpdates};
 use revm::Database as _;
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, metadata::Level, span, warn};
 
 use crate::{
-    BuilderConfig, ExecutionInfo, PayloadBuilder,
+    BuilderConfig, ExecutionInfo, PayloadBuilder, ResourceLimits,
     flashblocks::{
         FlashblocksExtraCtx,
         best_txs::BestFlashblocksTxs,
-        config::FlashBlocksConfigExt,
         context::OpPayloadBuilderCtx,
         generator::{BlockCell, BuildArguments},
     },
@@ -84,7 +85,7 @@ pub struct FlashblocksExecutionInfo {
     pub(crate) access_list_builder: FlashblockAccessListBuilder,
 }
 
-/// Optimism's payload builder
+/// Base payload builder
 #[derive(Debug, Clone)]
 pub(super) struct OpPayloadBuilder<Pool, Client> {
     /// The type responsible for creating the evm.
@@ -202,27 +203,18 @@ where
             evm_env,
             block_env_attributes,
             cancel,
-            da_config: self.config.da_config.clone(),
-            gas_limit_config: self.config.gas_limit_config.clone(),
             metrics: Default::default(),
             extra,
-            max_gas_per_txn: self.config.max_gas_per_txn,
-            max_execution_time_per_tx_us: self.config.max_execution_time_per_tx_us,
-            max_state_root_time_per_tx_us: self.config.max_state_root_time_per_tx_us,
-            flashblock_execution_time_budget_us: self.config.flashblock_execution_time_budget_us,
-            block_state_root_time_budget_us: self.config.block_state_root_time_budget_us,
-            max_uncompressed_block_size: self.config.max_uncompressed_block_size,
-            execution_metering_mode: self.config.execution_metering_mode,
-            metering_provider: Arc::clone(&self.config.metering_provider),
+            builder_config: self.config.clone(),
         })
     }
 
-    /// Constructs an Optimism payload from the transactions sent via the
+    /// Constructs a Base payload from the transactions sent via the
     /// Payload attributes by the sequencer. If the `no_tx_pool` argument is passed in
     /// the payload attributes, the transaction pool will be ignored and the only transactions
     /// included in the payload will be those sent through the attributes.
     ///
-    /// Given build arguments including an Optimism client, transaction pool,
+    /// Given build arguments including a Base client, transaction pool,
     /// and configuration, this function creates a transaction payload. Returns
     /// a result indicating success with the payload or an error in case of failure.
     async fn build_payload(
@@ -236,7 +228,6 @@ where
             config,
             cancel: block_cancel,
             finalized_cell,
-            compute_state_root_on_finalize,
             publish_guard,
         } = args;
 
@@ -250,14 +241,12 @@ where
         span.record("payload_id", config.attributes.payload_attributes.id.to_string());
 
         let timestamp = config.attributes.timestamp();
-        let disable_state_root = self.config.flashblocks.disable_state_root;
-        let ctx = self
+        let mut ctx = self
             .get_op_payload_builder_ctx(
-                config.clone(),
+                config,
                 block_cancel.clone(),
                 FlashblocksExtraCtx {
                     target_flashblock_count: self.config.flashblocks_per_block(),
-                    disable_state_root,
                     ..Default::default()
                 },
             )
@@ -276,11 +265,17 @@ where
         ctx.metrics.sequencer_tx_duration.record(sequencer_tx_time);
         ctx.metrics.sequencer_tx_gauge.set(sequencer_tx_time);
 
+        // We adjust our flashblocks timings based on time_drift if dynamic adjustment enable
+        let (flashblocks_per_block, first_flashblock_offset) =
+            self.calculate_flashblocks(timestamp);
+
+        let skip_flashblocks_building = ctx.attributes().no_tx_pool || flashblocks_per_block == 0;
+
         let (payload, fb_payload) = build_block(
             &mut state,
             &ctx,
             &mut info,
-            !disable_state_root || ctx.attributes().no_tx_pool, // need to calculate state root for CL sync
+            skip_flashblocks_building, // need to calculate state root for CL sync or if not building flashblocks
         )?;
 
         self.payload_tx.send(payload.clone()).await.map_err(PayloadBuilderError::other)?;
@@ -297,49 +292,69 @@ where
             let flashblock_byte_size =
                 self.ws_pub.publish(&fb_payload).map_err(PayloadBuilderError::other)?;
             ctx.metrics.flashblock_byte_size_histogram.record(flashblock_byte_size as f64);
-        }
-
-        if ctx.attributes().no_tx_pool {
-            if compute_state_root_on_finalize {
-                finalized_cell.set(payload);
-            }
-
+            ctx.metrics
+                .first_flashblock_time_offset
+                .record(first_flashblock_offset.as_millis() as f64);
+            ctx.metrics
+                .reduced_flashblocks_number
+                .record(self.config.flashblocks_per_block().saturating_sub(flashblocks_per_block)
+                    as f64);
+        } else {
             info!(
                 target: "payload_builder",
                 "No transaction pool, skipping transaction pool processing",
             );
+            ctx.metrics.payload_num_tx.record(info.executed_transactions.len() as f64);
+            ctx.metrics.payload_num_tx_gauge.set(info.executed_transactions.len() as f64);
+        }
 
+        // fcu just arrived late, not syncing
+        if flashblocks_per_block == 0 && !ctx.attributes().no_tx_pool {
+            error!(
+                target: "payload_builder",
+                message = "FCU arrived too late or system clock are unsynced, building 0 flashblocks",
+                timestamp,
+            );
+
+            self.record_flashblocks_metrics(
+                &ctx,
+                &info,
+                flashblocks_per_block,
+                &span,
+                "FCU arrived too late or system clock are unsynced, building 0 flashblocks",
+            );
+        }
+
+        if skip_flashblocks_building {
+            finalized_cell.set(payload);
             let total_block_building_time = block_build_start_time.elapsed();
             ctx.metrics.total_block_built_duration.record(total_block_building_time);
             ctx.metrics.total_block_built_gauge.set(total_block_building_time);
-            ctx.metrics.payload_num_tx.record(info.executed_transactions.len() as f64);
-            ctx.metrics.payload_num_tx_gauge.set(info.executed_transactions.len() as f64);
 
             return Ok(());
         }
-        // We adjust our flashblocks timings based on time_drift if dynamic adjustment enable
-        let (flashblocks_per_block, first_flashblock_offset) =
-            self.calculate_flashblocks(timestamp);
+
         info!(
             target: "payload_builder",
             message = "Performed flashblocks timing derivation",
             flashblocks_per_block,
             first_flashblock_offset = first_flashblock_offset.as_millis(),
-            flashblocks_interval = self.config.flashblocks.interval.as_millis(),
+            flashblocks_interval = self.config.flashblocks_interval.as_millis(),
         );
-        ctx.metrics.reduced_flashblocks_number.record(
-            self.config.flashblocks_per_block().saturating_sub(flashblocks_per_block) as f64,
-        );
-        ctx.metrics.first_flashblock_time_offset.record(first_flashblock_offset.as_millis() as f64);
+
         let gas_per_batch = ctx.block_gas_limit() / flashblocks_per_block;
-        let da_per_batch =
-            ctx.da_config.max_da_block_size().map(|da_limit| da_limit / flashblocks_per_block);
+        let da_per_batch = ctx
+            .builder_config
+            .da_config
+            .max_da_block_size()
+            .map(|da_limit| da_limit / flashblocks_per_block);
         let da_footprint_per_batch =
             info.da_footprint_scalar.map(|_| ctx.block_gas_limit() / flashblocks_per_block);
-        let execution_time_per_batch_us = ctx.flashblock_execution_time_budget_us;
-        let state_root_time_per_batch_us = ctx
-            .block_state_root_time_budget_us
-            .map(|budget| budget / flashblocks_per_block as u128);
+        let execution_time_per_batch_us = ctx.builder_config.flashblock_execution_time_budget_us;
+        let state_root_gas_per_batch = ctx
+            .builder_config
+            .block_state_root_gas_limit
+            .map(|limit| limit / flashblocks_per_block);
 
         let extra = FlashblocksExtraCtx {
             flashblock_index: 1,
@@ -348,25 +363,22 @@ where
             target_da_for_batch: da_per_batch,
             target_da_footprint_for_batch: da_footprint_per_batch,
             target_execution_time_for_batch_us: execution_time_per_batch_us,
-            target_state_root_time_for_batch_us: state_root_time_per_batch_us,
+            target_state_root_gas_for_batch: state_root_gas_per_batch,
             gas_per_batch,
             da_per_batch,
             da_footprint_per_batch,
             execution_time_per_batch_us,
-            state_root_time_per_batch_us,
-            disable_state_root,
+            state_root_gas_per_batch,
         };
 
         let mut fb_cancel = block_cancel.child_token();
-        let mut ctx = self
-            .get_op_payload_builder_ctx(config, fb_cancel.clone(), extra)
-            .map_err(|e| PayloadBuilderError::Other(e.into()))?;
+        ctx = ctx.with_cancel(fb_cancel.clone()).with_extra_ctx(extra);
 
         // Create best_transaction iterator
         let mut best_txs = BestFlashblocksTxs::new(BestPayloadTransactions::new(
             self.pool.best_transactions_with_attributes(ctx.best_transaction_attributes()),
         ));
-        let interval = self.config.flashblocks.interval;
+        let interval = self.config.flashblocks_interval;
         let (tx, mut rx) = mpsc::channel((self.config.flashblocks_per_block() + 1) as usize);
 
         tokio::spawn({
@@ -428,9 +440,7 @@ where
                     &span,
                     "Payload building complete, target flashblock count reached",
                 );
-                if compute_state_root_on_finalize {
-                    self.finalize_payload(&mut state, &ctx, &mut info, &finalized_cell)?;
-                }
+                self.finalize_payload(&mut state, &ctx, &mut info, &finalized_cell)?;
                 return Ok(());
             }
 
@@ -458,9 +468,7 @@ where
                         &span,
                         "Payload building complete, job cancelled or target flashblock count reached",
                     );
-                    if compute_state_root_on_finalize {
-                        self.finalize_payload(&mut state, &ctx, &mut info, &finalized_cell)?;
-                    }
+                    self.finalize_payload(&mut state, &ctx, &mut info, &finalized_cell)?;
                     return Ok(());
                 }
                 Err(err) => {
@@ -487,9 +495,7 @@ where
                         &span,
                         "Payload building complete, channel closed or job cancelled",
                     );
-                    if compute_state_root_on_finalize {
-                        self.finalize_payload(&mut state, &ctx, &mut info, &finalized_cell)?;
-                    }
+                    self.finalize_payload(&mut state, &ctx, &mut info, &finalized_cell)?;
                     return Ok(());
                 }
             }
@@ -516,9 +522,8 @@ where
         let target_gas_for_batch = ctx.extra.target_gas_for_batch;
         let mut target_da_for_batch = ctx.extra.target_da_for_batch;
         let mut target_da_footprint_for_batch = ctx.extra.target_da_footprint_for_batch;
-        let mut target_state_root_time_for_batch_us = ctx.extra.target_state_root_time_for_batch_us;
+        let mut target_state_root_gas_for_batch = ctx.extra.target_state_root_gas_for_batch;
         let flashblock_execution_time_limit_us = ctx.extra.execution_time_per_batch_us;
-        let block_state_root_time_limit_us = target_state_root_time_for_batch_us;
 
         info!(
             target: "payload_builder",
@@ -531,7 +536,7 @@ where
             block_gas_used = ctx.block_gas_limit(),
             target_da_footprint = target_da_footprint_for_batch,
             flashblock_execution_time_limit_us = ?flashblock_execution_time_limit_us,
-            target_state_root_time_for_batch_us = ?target_state_root_time_for_batch_us,
+            target_state_root_gas_for_batch = ?target_state_root_gas_for_batch,
             "Building flashblock",
         );
         let flashblock_build_start_time = Instant::now();
@@ -569,23 +574,27 @@ where
         ctx.metrics.transaction_pool_fetch_gauge.set(transaction_pool_fetch_time);
 
         let tx_execution_start_time = Instant::now();
-        ctx.execute_best_transactions(
-            info,
-            state,
-            best_txs,
-            target_gas_for_batch.min(ctx.block_gas_limit()),
-            target_da_for_batch,
-            target_da_footprint_for_batch,
+        let limits = ResourceLimits {
+            block_gas_limit: target_gas_for_batch.min(ctx.block_gas_limit()),
+            tx_data_limit: ctx.builder_config.da_config.max_da_tx_size(),
+            block_data_limit: target_da_for_batch,
+            da_footprint_gas_scalar: info.da_footprint_scalar,
+            block_da_footprint_limit: target_da_footprint_for_batch,
+            tx_execution_time_limit_us: ctx.builder_config.max_execution_time_per_tx_us,
             flashblock_execution_time_limit_us,
-            block_state_root_time_limit_us,
-        )
-        .wrap_err("failed to execute best transactions")?;
+            block_state_root_gas_limit: target_state_root_gas_for_batch,
+            block_uncompressed_size_limit: ctx.builder_config.max_uncompressed_block_size,
+        };
+        let diag = ctx
+            .execute_best_transactions(info, state, best_txs, &limits)
+            .wrap_err("failed to execute best transactions")?;
         // Extract last transactions
         let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..]
             .iter()
             .map(|tx| tx.tx_hash())
             .collect::<Vec<_>>();
         best_txs.mark_committed(&new_transactions);
+        self.config.metering_provider.remove(&new_transactions);
         self.pool.prune_transactions(new_transactions);
 
         // Track executed nonces incrementally for the next flashblock's update_accounts call.
@@ -624,12 +633,7 @@ where
         ctx.metrics.payload_transaction_simulation_gauge.set(payload_transaction_simulation_time);
 
         let total_block_built_duration = Instant::now();
-        let build_result = build_block(
-            state,
-            ctx,
-            info,
-            !ctx.extra.disable_state_root || ctx.attributes().no_tx_pool,
-        );
+        let build_result = build_block(state, ctx, info, ctx.attributes().no_tx_pool);
         let total_block_built_duration = total_block_built_duration.elapsed();
         ctx.metrics.total_block_built_duration.record(total_block_built_duration);
         ctx.metrics.total_block_built_gauge.set(total_block_built_duration);
@@ -705,10 +709,9 @@ where
                     *footprint += da_footprint_limit;
                 }
 
-                if let (Some(time), Some(time_per_batch)) = (
-                    target_state_root_time_for_batch_us.as_mut(),
-                    ctx.extra.state_root_time_per_batch_us,
-                ) {
+                if let (Some(time), Some(time_per_batch)) =
+                    (target_state_root_gas_for_batch.as_mut(), ctx.extra.state_root_gas_per_batch)
+                {
                     *time += time_per_batch;
                 }
 
@@ -717,15 +720,35 @@ where
                     target_da_for_batch,
                     target_da_footprint_for_batch,
                     ctx.extra.execution_time_per_batch_us,
-                    target_state_root_time_for_batch_us,
+                    target_state_root_gas_for_batch,
                 );
 
+                let gas_headroom_pct = if limits.block_gas_limit > 0 {
+                    (limits.block_gas_limit.saturating_sub(info.cumulative_gas_used) as f64
+                        / limits.block_gas_limit as f64
+                        * 100.0) as u64
+                } else {
+                    0
+                };
+                ctx.metrics.record_flashblock_diagnostics(flashblock_index, &diag, info, &limits);
                 info!(
                     target: "payload_builder",
                     message = "Flashblock built",
                     flashblock_index = flashblock_index,
+                    selection_outcome = diag.selection_outcome().as_str(),
+                    rejection_reasons = ?diag.rejection_reasons(),
+                    txs_considered = diag.txs_considered,
+                    txs_included = diag.txs_included,
+                    txs_rejected = diag.txs_rejected_total(),
+                    min_priority_fee_wei = diag.min_priority_fee.unwrap_or(0),
                     current_gas = info.cumulative_gas_used,
+                    target_gas = limits.block_gas_limit,
+                    gas_headroom_pct = gas_headroom_pct,
                     current_da = info.cumulative_da_bytes_used,
+                    flashblock_exec_time_us = info.flashblock_execution_time_us,
+                    exec_time_limit_us = ?limits.flashblock_execution_time_limit_us,
+                    cumulative_state_root_gas = info.cumulative_state_root_gas,
+                    state_root_gas_limit = ?limits.block_state_root_gas_limit,
                     target_flashblocks = ctx.target_flashblock_count(),
                 );
 
@@ -751,11 +774,9 @@ where
         ctx.metrics.payload_num_tx.record(info.executed_transactions.len() as f64);
         ctx.metrics.payload_num_tx_gauge.set(info.executed_transactions.len() as f64);
 
-        // Record cumulative predicted state root time for the block (observation metric)
-        if info.cumulative_state_root_time_us > 0 {
-            ctx.metrics
-                .block_predicted_state_root_time_us
-                .record(info.cumulative_state_root_time_us as f64);
+        // Record cumulative state root gas for the block
+        if info.cumulative_state_root_gas > 0 {
+            ctx.metrics.block_state_root_gas.record(info.cumulative_state_root_gas as f64);
         }
 
         // Record cumulative uncompressed block size
@@ -802,17 +823,8 @@ where
         Ok(())
     }
 
-    /// Calculate number of flashblocks.
-    /// If dynamic is enabled this function will take time drift into the account.
+    /// Calculate number of flashblocks, taking time drift into account.
     pub(super) fn calculate_flashblocks(&self, timestamp: u64) -> (u64, Duration) {
-        if self.config.flashblocks.fixed {
-            return (
-                self.config.flashblocks_per_block(),
-                // We adjust first FB to ensure that we have at least some time to make all FB in time
-                self.config.flashblocks.interval - self.config.flashblocks.leeway_time,
-            );
-        }
-
         // We use this system time to determine remaining time to build a block
         // Things to consider:
         // FCU(a) - FCU with attributes
@@ -820,19 +832,15 @@ where
         // FCU(a) could arrive with `delay < fb_time` - in this case we will shrink first flashblock
         // FCU(a) could arrive with `fb_time < delay < block_time - fb_time` - in this case we will issue less flashblocks
         let target_time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp)
-            - self.config.flashblocks.leeway_time;
+            - self.config.flashblocks_leeway_time;
         let now = std::time::SystemTime::now();
         let Some(time_drift) =
             target_time.duration_since(now).ok().filter(|duration| duration.as_millis() > 0)
         else {
-            error!(
-                target: "payload_builder",
-                message = "FCU arrived too late or system clock are unsynced",
-                ?target_time,
-                ?now,
-            );
-            return (self.config.flashblocks_per_block(), self.config.flashblocks.interval);
+            // in this case, we have no time to produce any flashblocks
+            return (0, Duration::ZERO);
         };
+
         self.metrics.flashblocks_time_drift.record(
             self.config.block_time.as_millis().saturating_sub(time_drift.as_millis()) as f64,
         );
@@ -845,7 +853,7 @@ where
         );
         // This is extra check to ensure that we would account at least for block time in case we have any timer discrepancies.
         let time_drift = time_drift.min(self.config.block_time);
-        let interval = self.config.flashblocks.interval.as_millis() as u64;
+        let interval = self.config.flashblocks_interval.as_millis() as u64;
         let time_drift = time_drift.as_millis() as u64;
         let first_flashblock_offset = time_drift.rem(interval);
         if first_flashblock_offset == 0 {
@@ -876,12 +884,16 @@ where
     }
 }
 
-// TODO: unify with `base_primitives::Metadata` once receipts and balances are added to the shared type
+#[skip_serializing_none]
 #[derive(Debug, Serialize, Deserialize)]
 struct FlashblocksMetadata {
-    receipts: HashMap<B256, OpReceipt>,
-    new_account_balances: HashMap<Address, U256>,
+    /// Receipts for transactions in this flashblock (removed in Base 1.0)
+    receipts: Option<HashMap<B256, OpReceipt>>,
+    /// Changed account balances (removed in Base 1.0)
+    new_account_balances: Option<HashMap<Address, U256>>,
+    /// The block number this flashblock belongs to
     block_number: u64,
+    /// The flashblock access list
     access_list: Option<FlashblockAccessList>,
 }
 
@@ -1105,12 +1117,22 @@ where
     let fal_builder = std::mem::take(&mut info.extra.access_list_builder);
     let _access_list = fal_builder.build(min_tx_index, max_tx_index);
 
-    let metadata: FlashblocksMetadata = FlashblocksMetadata {
-        receipts: receipts_with_hash,
-        new_account_balances,
-        block_number: ctx.parent().number + 1,
-        access_list: None,
-    };
+    let metadata: FlashblocksMetadata =
+        if ctx.chain_spec.is_base_v1_active_at_timestamp(ctx.attributes().timestamp()) {
+            FlashblocksMetadata {
+                block_number: ctx.parent().number + 1,
+                access_list: None,
+                receipts: None,
+                new_account_balances: None,
+            }
+        } else {
+            FlashblocksMetadata {
+                block_number: ctx.parent().number + 1,
+                access_list: None,
+                new_account_balances: Some(new_account_balances),
+                receipts: Some(receipts_with_hash),
+            }
+        };
 
     // Prepare the flashblocks message
     let fb_payload = FlashblocksPayloadV1 {
@@ -1157,4 +1179,99 @@ where
         OpBuiltPayload::new(ctx.payload_id(), sealed_block, info.total_fees, Some(executed)),
         fb_payload,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_consensus::Receipt;
+    use alloy_primitives::{Address, B256, Log, U256, map::foldhash::HashMap};
+    use base_alloy_consensus::OpReceipt;
+    use base_alloy_flashblocks::Metadata;
+
+    use super::FlashblocksMetadata;
+
+    /// Pin the JSON field names and structure of [`FlashblocksMetadata`].
+    ///
+    /// This struct is serialized into the `metadata` field of the flashblocks
+    /// websocket payload. Changing field names, types, or serde attributes
+    /// without updating downstream consumers is a breaking change.
+    #[test]
+    fn flashblocks_metadata_json_format_is_stable() {
+        let tx_hash = B256::from([0xAA; 32]);
+        let address = Address::from([0xBB; 20]);
+
+        let receipt = OpReceipt::Eip1559(Receipt {
+            status: true.into(),
+            cumulative_gas_used: 21_000,
+            logs: Vec::<Log>::new(),
+        });
+
+        let mut receipts = HashMap::default();
+        receipts.insert(tx_hash, receipt);
+
+        let mut balances = HashMap::default();
+        balances.insert(address, U256::from(1_000_000_000_000_000_000u128));
+
+        let metadata = FlashblocksMetadata {
+            receipts: Some(receipts),
+            new_account_balances: Some(balances),
+            block_number: 42,
+            access_list: None,
+        };
+
+        let json = serde_json::to_value(&metadata).unwrap();
+        let obj = json.as_object().unwrap();
+
+        // Verify exact field set
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["block_number", "new_account_balances", "receipts"],
+            "metadata field names changed"
+        );
+
+        // block_number is a plain integer, not hex-encoded
+        assert_eq!(obj["block_number"], serde_json::json!(42));
+
+        // receipts is a map keyed by tx hash
+        let receipts_obj = obj["receipts"].as_object().unwrap();
+        let tx_key = format!("{tx_hash:#x}");
+        assert!(receipts_obj.contains_key(&tx_key), "receipt should be keyed by tx hash");
+
+        // receipt has internally-tagged type field
+        let receipt_json = &receipts_obj[&tx_key];
+        assert_eq!(receipt_json["type"], "0x2", "EIP-1559 receipt type tag must be 0x2");
+
+        // new_account_balances is a map keyed by address
+        let balances_obj = obj["new_account_balances"].as_object().unwrap();
+        let addr_key = format!("{address:#x}");
+        assert!(balances_obj.contains_key(&addr_key), "balance should be keyed by address");
+    }
+
+    /// The client-side [`Metadata`] type must be able to deserialize from
+    /// `FlashblocksMetadata` JSON, ignoring the extra fields.
+    #[test]
+    fn client_metadata_deserializes_from_builder_metadata() {
+        let metadata = FlashblocksMetadata {
+            receipts: Some(HashMap::default()),
+            new_account_balances: Some(HashMap::default()),
+            block_number: 99,
+            access_list: None,
+        };
+
+        let json = serde_json::to_value(&metadata).unwrap();
+        let client_metadata: Metadata =
+            serde_json::from_value(json).expect("client Metadata must parse builder metadata");
+        assert_eq!(client_metadata.block_number, 99);
+    }
+
+    /// The v0.4.1 metadata format (only `block_number`) must still deserialize
+    /// into the client-side [`Metadata`] type.
+    #[test]
+    fn client_metadata_deserializes_from_v0_4_1_format() {
+        let json = serde_json::json!({"block_number": 123});
+        let metadata: Metadata = serde_json::from_value(json).expect("v0.4.1 metadata must parse");
+        assert_eq!(metadata.block_number, 123);
+    }
 }

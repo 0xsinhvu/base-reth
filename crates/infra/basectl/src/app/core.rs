@@ -49,6 +49,16 @@ impl App {
             self.resources.da.poll();
             self.resources.flash.poll();
             self.resources.toasts.poll();
+            self.resources.conductor.poll();
+            // When a conductor cluster is configured, bridge the Raft leader's
+            // safe head into the DA tracker each tick.  The conductor poller
+            // already queries `op_sync_status` from every node's CL, so the
+            // leader's value is available here without an extra RPC.  This
+            // ensures the DA monitor advances even before sequencer-0's EL has
+            // P2P-synced blocks that were produced by a different leader.
+            if let Some(safe_head) = self.resources.conductor.leader_safe_l2_block() {
+                self.resources.da.apply_conductor_safe_head(safe_head);
+            }
             self.resources.poll_sys_config();
 
             let action = current_view.tick(&mut self.resources);
@@ -80,9 +90,17 @@ impl App {
                         self.show_help = !self.show_help;
                         Action::None
                     }
-                    KeyCode::Char('q') => Action::Quit,
+                    KeyCode::Char('q') => {
+                        if current_view.consumes_quit() {
+                            current_view.handle_key(key, &mut self.resources)
+                        } else {
+                            Action::Quit
+                        }
+                    }
                     KeyCode::Esc => {
-                        if self.router.current() == ViewId::Home {
+                        if current_view.consumes_esc() {
+                            current_view.handle_key(key, &mut self.resources)
+                        } else if self.router.current() == ViewId::Home {
                             Action::Quit
                         } else {
                             Action::SwitchView(ViewId::Home)

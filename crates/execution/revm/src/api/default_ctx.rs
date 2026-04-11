@@ -27,7 +27,7 @@ impl DefaultOp for OpContext<EmptyDB> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use revm::{
         ExecuteEvm,
         inspector::{InspectEvm, NoOpInspector},
@@ -39,7 +39,7 @@ mod test {
     #[test]
     fn default_run_op() {
         let ctx = Context::op();
-        // convert to optimism context
+        // convert to Base context
         let mut evm = ctx.build_op_with_inspector(NoOpInspector {});
         // execute
         let _ = evm.transact(OpTransaction::builder().build_fill());

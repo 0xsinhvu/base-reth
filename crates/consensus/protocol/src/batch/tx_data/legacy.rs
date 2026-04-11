@@ -47,7 +47,7 @@ impl SpanBatchLegacyTransactionData {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::vec::Vec;
 
     use alloy_rlp::{Decodable, Encodable as _};

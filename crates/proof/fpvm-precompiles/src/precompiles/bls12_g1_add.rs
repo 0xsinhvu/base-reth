@@ -57,7 +57,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::precompiles::test_utils::{execute_native_precompile, test_accelerated_precompile};
 

@@ -3,9 +3,9 @@
 use alloy_chains::Chain;
 use alloy_hardforks::{EthereumHardfork, EthereumHardforks, ForkCondition};
 use alloy_primitives::Address;
-use base_alloy_hardforks::{OpHardfork, OpHardforks};
+use base_alloy_chains::{BaseUpgrade, BaseUpgrades};
 
-use crate::{BASE_MAINNET_BASE_FEE_CONFIG, BaseFeeConfig, ChainGenesis, HardForkConfig};
+use crate::{BaseFeeConfig, ChainGenesis, HardForkConfig, base_fee_config};
 
 /// The max rlp bytes per channel for the Bedrock hardfork.
 pub const MAX_RLP_BYTES_PER_CHANNEL_BEDROCK: u64 = 10_000_000;
@@ -51,6 +51,10 @@ pub struct RollupConfig {
     /// The L1 chain ID
     pub l1_chain_id: u64,
     /// The L2 chain ID
+    #[cfg_attr(
+        feature = "serde",
+        serde(serialize_with = "chain_id_as_u64", deserialize_with = "chain_id_from_u64")
+    )]
     pub l2_chain_id: Chain,
     /// Hardfork timestamps.
     #[cfg_attr(feature = "serde", serde(flatten))]
@@ -78,10 +82,10 @@ pub struct RollupConfig {
 #[cfg(feature = "arbitrary")]
 impl<'a> arbitrary::Arbitrary<'a> for RollupConfig {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        use crate::BASE_SEPOLIA_BASE_FEE_CONFIG;
+        use base_alloy_chains::BaseChainConfig;
         let chain_op_config = match u32::arbitrary(u)? % 2 {
-            0 => BASE_MAINNET_BASE_FEE_CONFIG,
-            _ => BASE_SEPOLIA_BASE_FEE_CONFIG,
+            0 => BaseFeeConfig::from(BaseChainConfig::mainnet()),
+            _ => BaseFeeConfig::from(BaseChainConfig::sepolia()),
         };
 
         Ok(Self {
@@ -122,37 +126,7 @@ impl Default for RollupConfig {
             l1_system_config_address: Address::ZERO,
             protocol_versions_address: Address::ZERO,
             blobs_enabled_l1_timestamp: None,
-            chain_op_config: BASE_MAINNET_BASE_FEE_CONFIG,
-        }
-    }
-}
-
-#[cfg(feature = "revm")]
-impl RollupConfig {
-    /// Returns the active [`base_revm::OpSpecId`] for the executor.
-    ///
-    /// ## Takes
-    /// - `timestamp`: The timestamp of the executing block.
-    ///
-    /// ## Returns
-    /// The active [`base_revm::OpSpecId`] for the executor.
-    pub fn spec_id(&self, timestamp: u64) -> base_revm::OpSpecId {
-        if self.is_jovian_active(timestamp) {
-            base_revm::OpSpecId::JOVIAN
-        } else if self.is_isthmus_active(timestamp) {
-            base_revm::OpSpecId::ISTHMUS
-        } else if self.is_holocene_active(timestamp) {
-            base_revm::OpSpecId::HOLOCENE
-        } else if self.is_fjord_active(timestamp) {
-            base_revm::OpSpecId::FJORD
-        } else if self.is_ecotone_active(timestamp) {
-            base_revm::OpSpecId::ECOTONE
-        } else if self.is_canyon_active(timestamp) {
-            base_revm::OpSpecId::CANYON
-        } else if self.is_regolith_active(timestamp) {
-            base_revm::OpSpecId::REGOLITH
-        } else {
-            base_revm::OpSpecId::BEDROCK
+            chain_op_config: base_fee_config(0),
         }
     }
 }
@@ -276,6 +250,17 @@ impl RollupConfig {
             && !self.is_jovian_active(timestamp.saturating_sub(self.block_time))
     }
 
+    /// Returns true if Base V1 is active at the given timestamp.
+    pub fn is_base_v1_active(&self, timestamp: u64) -> bool {
+        self.hardforks.base.v1.is_some_and(|t| timestamp >= t)
+    }
+
+    /// Returns true if the timestamp marks the first Base V1 block.
+    pub fn is_first_base_v1_block(&self, timestamp: u64) -> bool {
+        self.is_base_v1_active(timestamp)
+            && !self.is_base_v1_active(timestamp.saturating_sub(self.block_time))
+    }
+
     /// Returns the max sequencer drift for the given timestamp.
     pub fn max_sequencer_drift(&self, timestamp: u64) -> u64 {
         if self.is_fjord_active(timestamp) {
@@ -338,73 +323,121 @@ impl RollupConfig {
 impl EthereumHardforks for RollupConfig {
     fn ethereum_fork_activation(&self, fork: EthereumHardfork) -> ForkCondition {
         if fork <= EthereumHardfork::Berlin {
-            // We assume that OP chains were launched with all forks before Berlin activated.
+            // We assume that Base chains were launched with all forks before Berlin activated.
             ForkCondition::Block(0)
         } else if fork <= EthereumHardfork::Paris {
             // Bedrock activates all hardforks up to Paris.
-            self.op_fork_activation(OpHardfork::Bedrock)
+            self.upgrade_activation(BaseUpgrade::Bedrock)
         } else if fork <= EthereumHardfork::Shanghai {
             // Canyon activates Shanghai hardfork.
-            self.op_fork_activation(OpHardfork::Canyon)
+            self.upgrade_activation(BaseUpgrade::Canyon)
         } else if fork <= EthereumHardfork::Cancun {
             // Ecotone activates Cancun hardfork.
-            self.op_fork_activation(OpHardfork::Ecotone)
+            self.upgrade_activation(BaseUpgrade::Ecotone)
         } else if fork <= EthereumHardfork::Prague {
             // Isthmus activates Prague hardfork.
-            self.op_fork_activation(OpHardfork::Isthmus)
+            self.upgrade_activation(BaseUpgrade::Isthmus)
         } else {
             ForkCondition::Never
         }
     }
 }
 
-impl OpHardforks for RollupConfig {
-    fn op_fork_activation(&self, fork: OpHardfork) -> ForkCondition {
+impl BaseUpgrades for RollupConfig {
+    fn upgrade_activation(&self, fork: BaseUpgrade) -> ForkCondition {
         match fork {
-            OpHardfork::Bedrock => ForkCondition::Block(0),
-            OpHardfork::Regolith => self
+            BaseUpgrade::Bedrock => ForkCondition::Block(0),
+            BaseUpgrade::Regolith => self
                 .hardforks
                 .regolith_time
                 .map(ForkCondition::Timestamp)
-                .unwrap_or_else(|| self.op_fork_activation(OpHardfork::Canyon)),
-            OpHardfork::Canyon => self
+                .unwrap_or_else(|| self.upgrade_activation(BaseUpgrade::Canyon)),
+            BaseUpgrade::Canyon => self
                 .hardforks
                 .canyon_time
                 .map(ForkCondition::Timestamp)
-                .unwrap_or_else(|| self.op_fork_activation(OpHardfork::Ecotone)),
-            OpHardfork::Ecotone => self
+                .unwrap_or_else(|| self.upgrade_activation(BaseUpgrade::Ecotone)),
+            BaseUpgrade::Ecotone => self
                 .hardforks
                 .ecotone_time
                 .map(ForkCondition::Timestamp)
-                .unwrap_or_else(|| self.op_fork_activation(OpHardfork::Fjord)),
-            OpHardfork::Fjord => self
+                .unwrap_or_else(|| self.upgrade_activation(BaseUpgrade::Fjord)),
+            BaseUpgrade::Fjord => self
                 .hardforks
                 .fjord_time
                 .map(ForkCondition::Timestamp)
-                .unwrap_or_else(|| self.op_fork_activation(OpHardfork::Granite)),
-            OpHardfork::Granite => self
+                .unwrap_or_else(|| self.upgrade_activation(BaseUpgrade::Granite)),
+            BaseUpgrade::Granite => self
                 .hardforks
                 .granite_time
                 .map(ForkCondition::Timestamp)
-                .unwrap_or_else(|| self.op_fork_activation(OpHardfork::Holocene)),
-            OpHardfork::Holocene => self
+                .unwrap_or_else(|| self.upgrade_activation(BaseUpgrade::Holocene)),
+            BaseUpgrade::Holocene => self
                 .hardforks
                 .holocene_time
                 .map(ForkCondition::Timestamp)
-                .unwrap_or_else(|| self.op_fork_activation(OpHardfork::Isthmus)),
-            OpHardfork::Isthmus => self
+                .unwrap_or_else(|| self.upgrade_activation(BaseUpgrade::Isthmus)),
+            BaseUpgrade::Isthmus => self
                 .hardforks
                 .isthmus_time
                 .map(ForkCondition::Timestamp)
-                .unwrap_or_else(|| self.op_fork_activation(OpHardfork::Jovian)),
-            OpHardfork::Jovian => self
+                .unwrap_or_else(|| self.upgrade_activation(BaseUpgrade::Jovian)),
+            BaseUpgrade::Jovian => self
                 .hardforks
                 .jovian_time
                 .map(ForkCondition::Timestamp)
                 .unwrap_or(ForkCondition::Never),
+            // V1 is standalone: not part of the Base upgrade cascade chain. It only activates
+            // when explicitly configured and never implies (or is implied by) Jovian being active.
+            BaseUpgrade::V1 => {
+                self.hardforks.base.v1.map(ForkCondition::Timestamp).unwrap_or(ForkCondition::Never)
+            }
             _ => ForkCondition::Never,
         }
     }
+}
+
+impl RollupConfig {
+    const BASE_V1_ACTIVATION_BANNER: &str = include_str!("../static/base_v1_activation_banner.txt");
+
+    /// Logs hardfork activation when building or processing the first block of a fork.
+    pub fn log_upgrade_activation(&self, block_number: u64, timestamp: u64) {
+        if self.is_first_ecotone_block(timestamp) {
+            tracing::info!(target: "upgrades", block_number, "Activating ecotone upgrade");
+        } else if self.is_first_fjord_block(timestamp) {
+            tracing::info!(target: "upgrades", block_number, "Activating fjord upgrade");
+        } else if self.is_first_granite_block(timestamp) {
+            tracing::info!(target: "upgrades", block_number, "Activating granite upgrade");
+        } else if self.is_first_holocene_block(timestamp) {
+            tracing::info!(target: "upgrades", block_number, "Activating holocene upgrade");
+        } else if self.is_first_isthmus_block(timestamp) {
+            tracing::info!(target: "upgrades", block_number, "Activating isthmus upgrade");
+        } else if self.is_first_jovian_block(timestamp) {
+            tracing::info!(target: "upgrades", block_number, "Activating jovian upgrade");
+        } else if self.is_first_base_v1_block(timestamp) {
+            for line in Self::BASE_V1_ACTIVATION_BANNER.lines() {
+                tracing::info!(target: "upgrades", "{line}");
+            }
+            tracing::info!(target: "upgrades", block_number, "Activating base v1 upgrade");
+        }
+    }
+}
+
+/// Serializes a [`Chain`] as its numeric chain ID.
+///
+/// `alloy_chains::Chain` serializes named chains (e.g. Base Sepolia) as a string like
+/// `"base-sepolia"`, but external consumers such as op-batcher expect a plain integer.
+/// This helper forces numeric serialization for all chains.
+#[cfg(feature = "serde")]
+fn chain_id_as_u64<S: serde::Serializer>(chain: &Chain, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u64(chain.id())
+}
+
+/// Deserializes a [`Chain`] from its numeric chain ID.
+#[cfg(feature = "serde")]
+fn chain_id_from_u64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Chain, D::Error> {
+    let id = <u64 as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(Chain::from_id(id))
 }
 
 #[cfg(test)]
@@ -425,28 +458,6 @@ mod tests {
         let mut bytes = [0u8; 1024];
         rand::rng().fill(bytes.as_mut_slice());
         RollupConfig::arbitrary(&mut arbitrary::Unstructured::new(&bytes)).unwrap();
-    }
-
-    #[test]
-    #[cfg(feature = "revm")]
-    fn test_revm_spec_id() {
-        // By default, the spec ID should be BEDROCK.
-        let mut config = RollupConfig {
-            hardforks: HardForkConfig { regolith_time: Some(10), ..Default::default() },
-            ..Default::default()
-        };
-        assert_eq!(config.spec_id(0), base_revm::OpSpecId::BEDROCK);
-        assert_eq!(config.spec_id(10), base_revm::OpSpecId::REGOLITH);
-        config.hardforks.canyon_time = Some(20);
-        assert_eq!(config.spec_id(20), base_revm::OpSpecId::CANYON);
-        config.hardforks.ecotone_time = Some(30);
-        assert_eq!(config.spec_id(30), base_revm::OpSpecId::ECOTONE);
-        config.hardforks.fjord_time = Some(40);
-        assert_eq!(config.spec_id(40), base_revm::OpSpecId::FJORD);
-        config.hardforks.holocene_time = Some(50);
-        assert_eq!(config.spec_id(50), base_revm::OpSpecId::HOLOCENE);
-        config.hardforks.isthmus_time = Some(60);
-        assert_eq!(config.spec_id(60), base_revm::OpSpecId::ISTHMUS);
     }
 
     #[test]
@@ -583,10 +594,26 @@ mod tests {
         assert!(config.is_isthmus_active(10));
         assert!(config.is_jovian_active(10));
         assert!(!config.is_jovian_active(9));
+        assert!(!config.is_base_v1_active(10));
+    }
+
+    #[test]
+    fn test_base_v1_active() {
+        use crate::BaseHardforkConfig;
+        let mut config = RollupConfig::default();
+        assert!(!config.is_base_v1_active(0));
+        config.hardforks.base = BaseHardforkConfig { v1: Some(10) };
+        // V1 does not cascade upward to existing forks
+        assert!(!config.is_regolith_active(10));
+        assert!(!config.is_canyon_active(10));
+        assert!(!config.is_jovian_active(10));
+        assert!(config.is_base_v1_active(10));
+        assert!(!config.is_base_v1_active(9));
     }
 
     #[test]
     fn test_is_first_fork_block() {
+        use crate::BaseHardforkConfig;
         let cfg = RollupConfig {
             hardforks: HardForkConfig {
                 regolith_time: Some(10),
@@ -599,6 +626,7 @@ mod tests {
                 pectra_blob_schedule_time: Some(80),
                 isthmus_time: Some(90),
                 jovian_time: Some(100),
+                base: BaseHardforkConfig { v1: Some(110) },
             },
             block_time: 2,
             ..Default::default()
@@ -653,6 +681,11 @@ mod tests {
         assert!(!cfg.is_first_jovian_block(98));
         assert!(cfg.is_first_jovian_block(100));
         assert!(!cfg.is_first_jovian_block(102));
+
+        // Base V1
+        assert!(!cfg.is_first_base_v1_block(108));
+        assert!(cfg.is_first_base_v1_block(110));
+        assert!(!cfg.is_first_base_v1_block(112));
     }
 
     #[test]
@@ -778,7 +811,7 @@ mod tests {
             l1_system_config_address: address!("94ee52a9d8edd72a85dea7fae3ba6d75e4bf1710"),
             protocol_versions_address: Address::ZERO,
             blobs_enabled_l1_timestamp: None,
-            chain_op_config: BASE_MAINNET_BASE_FEE_CONFIG,
+            chain_op_config: base_fee_config(0),
         };
 
         let deserialized: RollupConfig = serde_json::from_str(raw).unwrap();
@@ -832,6 +865,25 @@ mod tests {
 
         let err = serde_json::from_str::<RollupConfig>(raw).unwrap_err();
         assert_eq!(err.classify(), serde_json::error::Category::Data);
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn test_l2_chain_id_serializes_as_number() {
+        // Named chains (e.g. Base Sepolia, ID 84532) must serialize as a numeric JSON value,
+        // not as the string "base-sepolia". op-batcher and other Go consumers expect *big.Int.
+        let cfg = RollupConfig { l2_chain_id: Chain::from_id(84532), ..Default::default() };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            json["l2_chain_id"].is_number(),
+            "l2_chain_id must serialize as a number, got: {}",
+            json["l2_chain_id"]
+        );
+        assert_eq!(json["l2_chain_id"], 84532u64);
+
+        // Round-trip: deserializing from a numeric l2_chain_id must also work.
+        let round_tripped: RollupConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped.l2_chain_id.id(), 84532);
     }
 
     #[test]

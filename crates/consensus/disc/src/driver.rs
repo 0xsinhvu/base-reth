@@ -11,7 +11,7 @@ use tokio::{
     time::{Duration, sleep},
 };
 
-use crate::{Discv5Builder, Discv5Handler, HandlerRequest, LocalNode};
+use crate::{Discv5Builder, Discv5Handler, HandlerRequest, LocalNode, Metrics};
 
 /// The [`Discv5Driver`] drives the discovery service.
 ///
@@ -280,7 +280,7 @@ impl Discv5Driver {
                             discv5::Event::Discovered(enr) => {
                                 if EnrValidation::validate(&enr, chain_id).is_valid() {
                                     debug!(target: "discovery", enr = ?enr, "Valid ENR discovered, forwarding to swarm");
-                                    base_macros::inc!(gauge, crate::Metrics::DISCOVERY_EVENT, "type" => "discovered");
+                                    Metrics::discovery_event("discovered").increment(1.0);
                                     store.add_enr(enr.clone());
                                     let sender = enr_sender.clone();
                                     tokio::spawn(async move {
@@ -293,7 +293,7 @@ impl Discv5Driver {
                             discv5::Event::SessionEstablished(enr, addr) => {
                                 if EnrValidation::validate(&enr, chain_id).is_valid() {
                                     debug!(target: "discovery", addr = ?addr, enr = ?enr, "Session established with valid ENR, forwarding to swarm");
-                                    base_macros::inc!(gauge, crate::Metrics::DISCOVERY_EVENT, "type" => "session_established");
+                                    Metrics::discovery_event("session_established").increment(1.0);
                                     store.add_enr(enr.clone());
                                     let sender = enr_sender.clone();
                                     tokio::spawn(async move {
@@ -306,7 +306,7 @@ impl Discv5Driver {
                             discv5::Event::UnverifiableEnr { enr, .. } => {
                                 if EnrValidation::validate(&enr, chain_id).is_valid() {
                                     debug!(target: "discovery", enr = ?enr, "Valid ENR discovered, forwarding to swarm");
-                                    base_macros::inc!(gauge, crate::Metrics::DISCOVERY_EVENT, "type" => "unverifiable_enr");
+                                    Metrics::discovery_event("unverifiable_enr").increment(1.0);
                                     store.add_enr(enr.clone());
                                     let sender = enr_sender.clone();
                                     tokio::spawn(async move {
@@ -323,7 +323,7 @@ impl Discv5Driver {
                     _ = interval.tick() => {
                         let id = NodeId::random();
                         trace!(target: "discovery", node_id = %id, "Finding random node");
-                        base_macros::inc!(gauge, crate::Metrics::FIND_NODE_REQUEST, "find_node" => "find_node");
+                        Metrics::find_node_request().increment(1.0);
                         let fut = self.disc.find_node(id);
                         let enr_sender = enr_sender.clone();
                         tokio::spawn(async move {
@@ -351,8 +351,8 @@ impl Discv5Driver {
 
                         let elapsed = start.elapsed();
                         debug!(target: "discovery", elapsed = ?elapsed, "Bootstore ENRs stored");
-                        base_macros::record!(histogram, crate::Metrics::ENR_STORE_TIME, "store_time", "store_time", elapsed.as_secs_f64());
-                        base_macros::set!(gauge, crate::Metrics::DISCOVERY_PEER_COUNT, self.disc.connected_peers() as f64);
+                        Metrics::enr_store_time().record(elapsed.as_secs_f64());
+                        Metrics::discovery_peer_count().set(self.disc.connected_peers() as f64);
                     }
                     _ = removal_interval.tick() => {
                         if remove {
@@ -378,7 +378,7 @@ impl Discv5Driver {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use base_consensus_genesis::{BASE_MAINNET_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID};
+    use base_alloy_chains::BaseChainConfig;
     use discv5::{
         ConfigBuilder,
         enr::{CombinedKey, CombinedPublicKey},
@@ -398,13 +398,13 @@ mod tests {
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let discovery = Discv5Driver::builder(
             LocalNode::new(secret_key, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
-            BASE_SEPOLIA_CHAIN_ID,
+            BaseChainConfig::sepolia().chain_id,
             ConfigBuilder::new(socket.into()).build(),
         )
         .build()
         .expect("Failed to build discovery service");
         let (handle, _) = discovery.start();
-        assert_eq!(handle.chain_id, BASE_SEPOLIA_CHAIN_ID);
+        assert_eq!(handle.chain_id, BaseChainConfig::sepolia().chain_id);
     }
 
     #[tokio::test]
@@ -420,7 +420,7 @@ mod tests {
         };
         let mut discovery = Discv5Driver::builder(
             LocalNode::new(secret_key, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
-            BASE_SEPOLIA_CHAIN_ID,
+            BaseChainConfig::sepolia().chain_id,
             ConfigBuilder::new(socket.into()).build(),
         )
         .with_bootnodes(BootNodes::testnet())
@@ -435,13 +435,13 @@ mod tests {
         Discv5Driver::bootstrap_peers(
             discovery.bootstore,
             discovery.bootnodes,
-            BASE_SEPOLIA_CHAIN_ID,
+            BaseChainConfig::sepolia().chain_id,
             &discovery.disc,
         )
         .await;
         assert!(
-            discovery.disc.table_entries_enr().len() >= 5,
-            "Discovery table should have at least 5 ENRs"
+            discovery.disc.table_entries_enr().len() >= 2,
+            "Discovery table should have at least 2 ENRs"
         );
 
         // Filter out testnet ENRs that are not valid.
@@ -450,7 +450,9 @@ mod tests {
             .iter()
             .filter_map(|node| match node {
                 BootNode::Enr(enr) => {
-                    if EnrValidation::validate(enr, BASE_SEPOLIA_CHAIN_ID).is_invalid() {
+                    if EnrValidation::validate(enr, BaseChainConfig::sepolia().chain_id)
+                        .is_invalid()
+                    {
                         return None;
                     }
                     Some(enr.public_key())
@@ -463,8 +465,8 @@ mod tests {
             })
             .collect();
 
-        // There should be 8 valid boot nodes for the testnet (all enodes).
-        assert_eq!(testnet.len(), 8);
+        // There should be 2 valid boot nodes for the testnet (all enodes).
+        assert_eq!(testnet.len(), 2);
 
         // Those ENRs should be in the testnet bootnodes.
         let disc_enrs = discovery.disc.table_entries_enr();
@@ -491,7 +493,9 @@ mod tests {
             .iter()
             .filter_map(|node| match node {
                 BootNode::Enr(enr) => {
-                    if EnrValidation::validate(enr, BASE_MAINNET_CHAIN_ID).is_invalid() {
+                    if EnrValidation::validate(enr, BaseChainConfig::mainnet().chain_id)
+                        .is_invalid()
+                    {
                         return None;
                     }
                     Some(enr.public_key())
@@ -504,9 +508,9 @@ mod tests {
             })
             .collect();
 
-        // There should be 21 valid boot nodes for the mainnet:
-        // 5 Base Mainnet ENRs + 16 enodes.
-        assert_eq!(mainnet.len(), 21);
+        // There should be 10 valid boot nodes for the mainnet:
+        // 5 Base Mainnet ENRs + 5 Base enodes.
+        assert_eq!(mainnet.len(), 10);
 
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
@@ -516,7 +520,7 @@ mod tests {
 
         let mut discovery = Discv5Driver::builder(
             LocalNode::new(secret_key, IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
-            BASE_MAINNET_CHAIN_ID,
+            BaseChainConfig::mainnet().chain_id,
             ConfigBuilder::new(socket.into()).build(),
         )
         .with_bootnodes(BootNodes::mainnet())
@@ -531,7 +535,7 @@ mod tests {
         Discv5Driver::bootstrap_peers(
             discovery.bootstore,
             discovery.bootnodes,
-            BASE_MAINNET_CHAIN_ID,
+            BaseChainConfig::mainnet().chain_id,
             &discovery.disc,
         )
         .await;

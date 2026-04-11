@@ -1,7 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![doc(
     html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
-    html_favicon_url = "https://raw.githubusercontent.com/alloy-rs/core/main/assets/favicon.ico"
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    issue_tracker_base_url = "https://github.com/base/base/issues/"
 )]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -31,11 +32,8 @@ pub use transaction::{
     OpTransactionInfo, OpTxEnvelope, OpTxType, OpTypedTransaction, TxDeposit,
 };
 
-mod eip1559;
-pub use eip1559::{
-    EIP1559ParamError, decode_eip_1559_params, decode_holocene_extra_data,
-    decode_jovian_extra_data, encode_holocene_extra_data, encode_jovian_extra_data,
-};
+mod extra;
+pub use extra::{EIP1559ParamError, HoloceneExtraData, JovianExtraData};
 
 mod source;
 pub use source::*;

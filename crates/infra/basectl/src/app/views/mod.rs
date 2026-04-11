@@ -1,6 +1,9 @@
 mod command_center;
 pub(crate) use command_center::CommandCenterView;
 
+mod conductor;
+pub(crate) use conductor::ConductorView;
+
 mod config;
 pub(crate) use config::ConfigView;
 
@@ -15,3 +18,6 @@ pub(crate) use flashblocks::FlashblocksView;
 
 mod home;
 pub(crate) use home::HomeView;
+
+mod transaction_pane;
+pub(crate) use transaction_pane::TransactionPane;

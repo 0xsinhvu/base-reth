@@ -13,8 +13,8 @@ workspace = true
 [dependencies]
 # General
 tracing.workspace = true
-thiserror.workspace = true
 async-trait.workspace = true
+thiserror.workspace = true
 alloy-primitives.workspace = true
 
 # `std` feature dependencies
@@ -22,6 +22,9 @@ async-channel = { workspace = true, optional = true }
 
 # `serde` feature dependencies
 serde = { workspace = true, optional = true, features = ["derive"] }
+
+# `rkyv` feature dependencies
+rkyv = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
@@ -31,8 +34,10 @@ default = []
 std = [
 	"alloy-primitives/std",
 	"dep:async-channel",
+	"rkyv?/std",
 	"serde?/std",
 	"thiserror/std",
 	"tracing/std",
 ]
 serde = [ "alloy-primitives/serde", "dep:serde" ]
+rkyv = [ "dep:rkyv" ]

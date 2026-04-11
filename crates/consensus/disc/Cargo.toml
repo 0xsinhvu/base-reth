@@ -1,7 +1,7 @@
 [package]
 name = "base-consensus-disc"
 version.workspace = true
-description = "Discovery service for the OP Stack"
+description = "Discovery service for Base"
 
 edition.workspace = true
 license.workspace = true
@@ -14,24 +14,24 @@ workspace = true
 
 [dependencies]
 # consensus
+base-metrics.workspace = true
 base-consensus-peers.workspace = true
-base-macros.workspace = true
 base-consensus-genesis.workspace = true
 
 # Alloy
 alloy-rlp = { workspace = true, features = ["std"] }
 
 # Networking
-discv5 = { workspace = true, features = ["libp2p"] }
 libp2p.workspace = true
+discv5 = { workspace = true, features = ["libp2p"] }
 
 # Misc
 tokio.workspace = true
+derive_more.workspace = true
 tracing = { workspace = true, features = ["std"] }
 thiserror = { workspace = true, features = ["std"] }
-derive_more.workspace = true
-backon = { workspace = true, features = ["std", "tokio", "tokio-sleep"] }
 rand = { workspace = true, features = ["thread_rng"] }
+backon = { workspace = true, features = ["std", "tokio", "tokio-sleep"] }
 
 # `metrics` feature
 metrics = { workspace = true, optional = true }
@@ -39,6 +39,7 @@ metrics = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile.workspace = true
 base-cli-utils.workspace = true
+base-alloy-chains.workspace = true
 serde_json = { workspace = true, features = ["std"] }
 
 [features]

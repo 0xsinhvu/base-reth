@@ -1,5 +1,9 @@
 #![doc = include_str!("../README.md")]
-#![doc(issue_tracker_base_url = "https://github.com/base/base/issues/")]
+#![doc(
+    html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    issue_tracker_base_url = "https://github.com/base/base/issues/"
+)]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
@@ -23,10 +27,10 @@ pub use health::{HealthzResponse, HealthzRpc};
 
 mod jsonrpsee;
 #[cfg(feature = "client")]
-pub use jsonrpsee::{AdminApiClient, OpP2PApiClient, RollupNodeApiClient};
+pub use jsonrpsee::{AdminApiClient, ConductorApiClient, OpP2PApiClient, RollupNodeApiClient};
 pub use jsonrpsee::{
-    AdminApiServer, DevEngineApiServer, HealthzApiServer, MinerApiExtServer, OpAdminApiServer,
-    OpP2PApiServer, RollupNodeApiServer, WsServer,
+    AdminApiServer, ConductorApiServer, DevEngineApiServer, HealthzApiServer, MinerApiExtServer,
+    OpAdminApiServer, OpP2PApiServer, RollupNodeApiServer, WsServer,
 };
 
 mod l1_watcher;

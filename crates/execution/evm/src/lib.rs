@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![doc(
     html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
-    html_favicon_url = "https://avatars0.githubusercontent.com/u/97369466?s=256",
-    issue_tracker_base_url = "https://github.com/paradigmxyz/reth/issues/"
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    issue_tracker_base_url = "https://github.com/base/base/issues/"
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -15,10 +15,12 @@ use core::fmt::Debug;
 
 use alloy_consensus::{BlockHeader, Header};
 use alloy_evm::{EvmFactory, FromRecoveredTx, FromTxWithEncoded};
+use base_alloy_chains::BaseUpgrades;
 use base_alloy_consensus::EIP1559ParamError;
-use base_alloy_evm::{OpReceiptBuilder, OpTxEnv};
+use base_alloy_evm::{
+    OpBlockExecutionCtx, OpBlockExecutorFactory, OpEvmFactory, OpReceiptBuilder, OpTxEnv,
+};
 use base_execution_chainspec::OpChainSpec;
-use base_execution_forks::OpHardforks;
 use base_execution_primitives::{DepositReceipt, OpPrimitives};
 use base_revm::{OpSpecId, OpTransaction};
 use reth_chainspec::EthChainSpec;
@@ -53,11 +55,13 @@ mod build;
 pub use build::OpBlockAssembler;
 
 mod error;
-pub use base_alloy_evm::{OpBlockExecutionCtx, OpBlockExecutorFactory, OpEvm, OpEvmFactory};
 pub use error::{L1BlockInfoError, OpBlockExecutionError};
 
 /// Builds an [`EvmEnv`] for a given block header using [`base_alloy_evm`]'s spec resolution.
-fn op_evm_env(header: &Header, chain_spec: &(impl OpHardforks + EthChainSpec)) -> EvmEnv<OpSpecId> {
+fn op_evm_env(
+    header: &Header,
+    chain_spec: &(impl BaseUpgrades + EthChainSpec),
+) -> EvmEnv<OpSpecId> {
     let spec = revm_spec_by_timestamp_after_bedrock(chain_spec, header.timestamp);
     let cfg_env =
         CfgEnv::new().with_chain_id(chain_spec.chain().id()).with_spec_and_mainnet_gas_params(spec);
@@ -88,7 +92,7 @@ fn op_next_evm_env(
     parent: &Header,
     attributes: &OpNextBlockEnvAttributes,
     base_fee_per_gas: u64,
-    chain_spec: &(impl OpHardforks + EthChainSpec),
+    chain_spec: &(impl BaseUpgrades + EthChainSpec),
 ) -> EvmEnv<OpSpecId> {
     let spec = revm_spec_by_timestamp_after_bedrock(chain_spec, attributes.timestamp);
     let cfg_env =
@@ -115,7 +119,7 @@ fn op_next_evm_env(
     EvmEnv { cfg_env, block_env }
 }
 
-/// Optimism-related EVM configuration.
+/// Base EVM configuration.
 #[derive(Debug)]
 pub struct OpEvmConfig<
     ChainSpec = OpChainSpec,
@@ -125,7 +129,7 @@ pub struct OpEvmConfig<
 > {
     /// Inner [`OpBlockExecutorFactory`].
     pub executor_factory: OpBlockExecutorFactory<R, Arc<ChainSpec>, EvmFactory>,
-    /// Optimism block assembler.
+    /// Base block assembler.
     pub block_assembler: OpBlockAssembler<ChainSpec>,
     #[doc(hidden)]
     pub _pd: core::marker::PhantomData<N>,
@@ -143,14 +147,14 @@ impl<ChainSpec, N: NodePrimitives, R: Clone, EvmFactory: Clone> Clone
     }
 }
 
-impl<ChainSpec: OpHardforks> OpEvmConfig<ChainSpec> {
-    /// Creates a new [`OpEvmConfig`] with the given chain spec for OP chains.
+impl<ChainSpec: BaseUpgrades> OpEvmConfig<ChainSpec> {
+    /// Creates a new [`OpEvmConfig`] with the given chain spec for Base chains.
     pub fn optimism(chain_spec: Arc<ChainSpec>) -> Self {
         Self::new(chain_spec, OpRethReceiptBuilder::default())
     }
 }
 
-impl<ChainSpec: OpHardforks, N: NodePrimitives, R> OpEvmConfig<ChainSpec, N, R> {
+impl<ChainSpec: BaseUpgrades, N: NodePrimitives, R> OpEvmConfig<ChainSpec, N, R> {
     /// Creates a new [`OpEvmConfig`] with the given chain spec.
     pub fn new(chain_spec: Arc<ChainSpec>, receipt_builder: R) -> Self {
         Self {
@@ -167,7 +171,7 @@ impl<ChainSpec: OpHardforks, N: NodePrimitives, R> OpEvmConfig<ChainSpec, N, R> 
 
 impl<ChainSpec, N, R, EvmFactory> OpEvmConfig<ChainSpec, N, R, EvmFactory>
 where
-    ChainSpec: OpHardforks,
+    ChainSpec: BaseUpgrades,
     N: NodePrimitives,
 {
     /// Returns the chain spec associated with this configuration.
@@ -178,7 +182,7 @@ where
 
 impl<ChainSpec, N, R, EvmF> ConfigureEvm for OpEvmConfig<ChainSpec, N, R, EvmF>
 where
-    ChainSpec: EthChainSpec<Header = Header> + OpHardforks,
+    ChainSpec: EthChainSpec<Header = Header> + BaseUpgrades,
     N: NodePrimitives<
             Receipt = R::Receipt,
             SignedTx = R::Transaction,
@@ -255,7 +259,7 @@ where
 #[cfg(feature = "std")]
 impl<ChainSpec, N, R> ConfigureEngineEvm<OpExecutionData> for OpEvmConfig<ChainSpec, N, R>
 where
-    ChainSpec: EthChainSpec<Header = Header> + OpHardforks,
+    ChainSpec: EthChainSpec<Header = Header> + BaseUpgrades,
     N: NodePrimitives<
             Receipt = R::Receipt,
             SignedTx = R::Transaction,
@@ -344,8 +348,9 @@ mod tests {
         Address, B256, LogData, bytes,
         map::{AddressMap, B256Map, HashMap},
     };
-    use base_execution_chainspec::{BASE_MAINNET, OpChainSpec};
-    use base_execution_primitives::{OpBlock, OpPrimitives, OpReceipt};
+    use base_alloy_consensus::{OpBlock, OpReceipt};
+    use base_execution_chainspec::{BASE_MAINNET, OpChainSpec, OpChainSpecBuilder};
+    use base_execution_primitives::OpPrimitives;
     use base_revm::OpSpecId;
     use reth_chainspec::ChainSpec;
     use reth_evm::execute::ProviderError;
@@ -365,6 +370,21 @@ mod tests {
 
     fn test_evm_config() -> OpEvmConfig {
         OpEvmConfig::optimism(BASE_MAINNET.clone())
+    }
+
+    #[test]
+    fn test_evm_env_uses_base_v1_for_genesis_chain_spec() {
+        let chain_spec = Arc::new(
+            OpChainSpecBuilder::default()
+                .chain(0.into())
+                .genesis(Genesis::default())
+                .base_v1_activated()
+                .build(),
+        );
+        let evm_config = OpEvmConfig::optimism(chain_spec);
+        let header = Header { timestamp: 0, ..Default::default() };
+        let EvmEnv { cfg_env, .. } = evm_config.evm_env(&header).unwrap();
+        assert_eq!(cfg_env.spec, OpSpecId::BASE_V1);
     }
 
     #[test]

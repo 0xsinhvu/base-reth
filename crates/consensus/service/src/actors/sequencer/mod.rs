@@ -1,5 +1,8 @@
 //! The `SequencerActor` and its components.
 
+mod build;
+pub use build::{PayloadBuilder, UnsealedPayloadHandle};
+
 mod config;
 pub use config::SequencerConfig;
 
@@ -9,8 +12,17 @@ pub use origin_selector::{
     L1OriginSelectorProvider, OriginSelector,
 };
 
+mod recovery;
+pub use recovery::RecoveryModeGuard;
+
+mod seal;
+pub use seal::{PayloadSealer, SealState, SealStepError};
+
+mod pool;
+pub use pool::PoolActivation;
+
 mod actor;
-pub use actor::SequencerActor;
+pub use actor::{PendingStopSender, SequencerActor};
 
 mod admin_api_impl;
 pub use admin_api_impl::SequencerAdminQuery;

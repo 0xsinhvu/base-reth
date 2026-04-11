@@ -20,17 +20,18 @@ RUSTFLAGS="${RUSTFLAGS} --cfg getrandom_backend=\"custom\""
 export RUSTFLAGS
 
 proof_packages=(
-  base-proof-preimage
-  base-proof-mpt
-  base-proof-executor
-  base-proof-driver
   base-proof
   base-proof-client
+  base-proof-driver
+  base-proof-executor
   base-proof-fpvm-precompiles
+  base-proof-mpt
+  base-proof-preimage
+  base-proof-primitives
 )
 
 for package in "${proof_packages[@]}"; do
-  cmd="cargo +nightly build -p $package -Zbuild-std=core,alloc --target riscv32imac-unknown-none-elf --no-default-features"
+  cmd="cargo +nightly build --locked -p $package -Zbuild-std=core,alloc --target riscv32imac-unknown-none-elf --no-default-features"
   if [ -n "$CI" ]; then
     echo "::group::$cmd"
   else

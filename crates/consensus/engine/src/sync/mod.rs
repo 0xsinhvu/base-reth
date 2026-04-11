@@ -1,4 +1,4 @@
-//! Sync start algorithm for the OP Stack rollup node.
+//! Sync start algorithm for the Base rollup node.
 
 use base_consensus_genesis::RollupConfig;
 use base_protocol::L2BlockInfo;
@@ -118,7 +118,7 @@ pub async fn find_starting_forkchoice<EngineClient_: EngineClient>(
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloy_eips::BlockNumHash;
     use alloy_primitives::{B256, b256};
     use alloy_provider::Network;

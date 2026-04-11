@@ -1,6 +1,10 @@
 #![allow(missing_docs)]
 #![doc = include_str!("../README.md")]
-#![doc(issue_tracker_base_url = "https://github.com/base/base/issues/")]
+#![doc(
+    html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    issue_tracker_base_url = "https://github.com/base/base/issues/"
+)]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(test), allow(unused_crate_dependencies))]
 
@@ -28,9 +32,13 @@ pub use metering::{MeteringProvider, NoopMeteringProvider, SharedMeteringProvide
 mod flashblocks;
 pub use flashblocks::{
     BestFlashblocksTxs, BlockCell, BlockPayloadJob, BlockPayloadJobGenerator, BuildArguments,
-    FlashblocksConfig, FlashblocksExecutionInfo, FlashblocksExtraCtx, FlashblocksServiceBuilder,
-    OpPayloadBuilderCtx, PayloadBuilder, PayloadHandler, ResolvePayload, WaitForValue,
+    FlashblockDiagnostics, FlashblockSelectionOutcome, FlashblocksExecutionInfo,
+    FlashblocksExtraCtx, FlashblocksServiceBuilder, OpPayloadBuilderCtx, PayloadBuilder,
+    PayloadHandler, ResolvePayload, WaitForValue,
 };
+
+mod extension;
+pub use extension::BuilderApiExtension;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

@@ -1,5 +1,9 @@
 #![doc = include_str!("../README.md")]
-#![doc(issue_tracker_base_url = "https://github.com/base/base/issues/")]
+#![doc(
+    html_logo_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    html_favicon_url = "https://avatars.githubusercontent.com/u/16627100?s=200&v=4",
+    issue_tracker_base_url = "https://github.com/base/base/issues/"
+)]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 mod config;
@@ -29,5 +33,5 @@ pub use rollup_client::{RollupClient, RollupClientConfig};
 mod types;
 pub use types::{
     GenesisL2BlockRef, HttpProvider, L1BlockId, L1BlockRef, L2BlockRef, L2HttpProvider, OpBlock,
-    SyncStatus,
+    OutputAtBlock, SyncStatus,
 };

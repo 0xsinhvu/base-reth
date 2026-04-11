@@ -618,7 +618,7 @@ impl Decodable for TrieNode {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use alloc::{collections::BTreeMap, vec, vec::Vec};
 
     use alloy_primitives::{b256, bytes, hex, keccak256};
