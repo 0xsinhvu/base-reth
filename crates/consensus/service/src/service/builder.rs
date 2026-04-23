@@ -50,6 +50,8 @@ pub struct L1ConfigBuilder {
     /// The duration in seconds of an L1 slot. This can be used to hardcode a fixed slot
     /// duration if the l1-beacon's slot configuration is not available.
     pub slot_duration_override: Option<u64>,
+    /// Number of L1 blocks to keep distance from the L1 head for the verifier.
+    pub verifier_l1_confs: u64,
 }
 
 /// The [`RollupNodeBuilder`] is used to construct a [`RollupNode`] service.
@@ -174,6 +176,7 @@ impl RollupNodeBuilder {
             beacon_client: l1_beacon,
             engine_provider: RootProvider::new_http(self.l1_config_builder.rpc_url.clone()),
             finalized_poll_interval,
+            verifier_l1_confs: self.l1_config_builder.verifier_l1_confs,
         };
 
         let jwt_secret = self.engine_config.l2_jwt_secret;
@@ -182,8 +185,27 @@ impl RollupNodeBuilder {
         let auth_layer = AuthLayer::new(jwt_secret);
         let service = ServiceBuilder::new().layer(auth_layer).service(hyper_client);
 
+        // Normalize ws:// -> http:// and wss:// -> https:// so the Hyper HTTP client
+        // can connect regardless of whether the engine URL uses a WebSocket scheme.
+        //
+        // This provider is used exclusively for request/response eth_* calls by the
+        // derivation pipeline (block fetching, receipt fetching, system config). It does
+        // not use subscriptions, so HTTP is sufficient and avoids an async WS handshake
+        // here. `build()` is sync; the engine client (built async in `node.rs`) is the
+        // one that uses the WS transport end-to-end.
+        let mut l2_http_url = self.engine_config.l2_url.clone();
+        match l2_http_url.scheme() {
+            "ws" => {
+                let _ = l2_http_url.set_scheme("http");
+            }
+            "wss" => {
+                let _ = l2_http_url.set_scheme("https");
+            }
+            _ => {}
+        }
+
         let layer_transport = HyperClient::with_service(service);
-        let http_hyper = Http::with_client(layer_transport, self.engine_config.l2_url.clone());
+        let http_hyper = Http::with_client(layer_transport, l2_http_url);
         let rpc_client = RpcClient::new(http_hyper, false);
         let l2_provider = RootProvider::<Base>::new(rpc_client);
 

@@ -90,7 +90,9 @@ impl JwtValidator {
         let engine = OpEngineClient::<RootProvider, RootProvider<Base>>::rpc_client::<Base>(
             http_url,
             self.secret,
-        );
+        )
+        .await
+        .map_err(|e| JwtValidationError::CapabilityExchange(e.to_string()))?;
 
         let exchange = || async {
             match <RootProvider<Base> as OpEngineApi<

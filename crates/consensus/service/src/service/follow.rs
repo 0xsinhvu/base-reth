@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use alloy_eips::BlockNumberOrTag;
 use alloy_provider::RootProvider;
@@ -13,9 +16,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     AlloyL1BlockFetcher, BlockStream, DelegateL2Client, DelegateL2DerivationActor, EngineActor,
     EngineActorRequest, EngineConfig, EngineProcessor, EngineRpcProcessor, L1Config,
-    L1WatcherActor, NodeActor, QueuedDerivationEngineClient, QueuedEngineDerivationClient,
-    QueuedEngineRpcClient, QueuedL1WatcherDerivationClient, RpcActor, RpcContext,
-    service::node::HEAD_STREAM_POLL_INTERVAL,
+    L1WatcherActor, L1WatcherQueryProcessor, NodeActor, QueuedDerivationEngineClient,
+    QueuedEngineDerivationClient, QueuedEngineRpcClient, QueuedL1WatcherDerivationClient, RpcActor,
+    RpcContext, service::node::HEAD_STREAM_POLL_INTERVAL,
 };
 
 /// A lightweight node that follows another L2 node by polling its execution
@@ -109,7 +112,9 @@ impl FollowNode {
 
     /// Starts the follow node.
     pub async fn start(&self) -> Result<(), String> {
-        let engine_client = Arc::new(self.engine_config.clone().build_engine_client());
+        let engine_client = Arc::new(
+            self.engine_config.clone().build_engine_client().await.map_err(|e| e.to_string())?,
+        );
         self.start_inner(engine_client).await
     }
 
@@ -183,13 +188,21 @@ impl FollowNode {
         let l1_watcher = L1WatcherActor::new(
             Arc::clone(&self.config),
             AlloyL1BlockFetcher(self.l1_config.engine_provider.clone()),
-            l1_query_rx,
-            l1_head_updates_tx,
+            l1_head_updates_tx.clone(),
             QueuedL1WatcherDerivationClient { derivation_actor_request_tx },
             None,
             cancellation.clone(),
             head_stream,
             finalized_stream,
+            self.l1_config.verifier_l1_confs,
+            Arc::new(AtomicU64::new(0)),
+        );
+        let l1_query_processor = L1WatcherQueryProcessor::new(
+            Arc::clone(&self.config),
+            AlloyL1BlockFetcher(self.l1_config.engine_provider.clone()),
+            l1_query_rx,
+            l1_head_updates_tx.subscribe(),
+            cancellation.clone(),
         );
 
         crate::service::spawn_and_wait!(
@@ -207,6 +220,7 @@ impl FollowNode {
                 Some((derivation, ())),
                 Some((engine_actor, ())),
                 Some((l1_watcher, ())),
+                Some((l1_query_processor, ())),
             ]
         );
         Ok(())

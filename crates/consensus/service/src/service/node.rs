@@ -1,5 +1,10 @@
 //! Contains the [`RollupNode`] implementation.
-use std::{ops::Not as _, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    ops::Not as _,
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use alloy_eips::BlockNumberOrTag;
 use alloy_provider::RootProvider;
@@ -22,11 +27,11 @@ use crate::{
     AlloyL1BlockFetcher, Conductor, ConductorClient, DelayedL1OriginSelectorProvider,
     DelegateDerivationActor, DerivationActor, DerivationDelegateClient, DerivationError,
     EngineActor, EngineActorRequest, EngineConfig, EngineProcessor, EngineRpcProcessor,
-    L1OriginSelector, L1WatcherActor, NetworkActor, NetworkBuilder, NetworkConfig, NodeActor,
-    NodeMode, PayloadBuilder, QueuedDerivationEngineClient, QueuedEngineDerivationClient,
-    QueuedEngineRpcClient, QueuedL1WatcherDerivationClient, QueuedNetworkEngineClient,
-    QueuedSequencerAdminAPIClient, QueuedSequencerEngineClient, RecoveryModeGuard, RpcActor,
-    RpcContext, SequencerActor, SequencerConfig,
+    L1OriginSelector, L1WatcherActor, L1WatcherQueryProcessor, NetworkActor, NetworkBuilder,
+    NetworkConfig, NodeActor, NodeMode, PayloadBuilder, QueuedDerivationEngineClient,
+    QueuedEngineDerivationClient, QueuedEngineRpcClient, QueuedL1WatcherDerivationClient,
+    QueuedNetworkEngineClient, QueuedSequencerAdminAPIClient, QueuedSequencerEngineClient,
+    RecoveryModeGuard, RpcActor, RpcContext, SequencerActor, SequencerConfig,
     actors::{BlockStream, NetworkInboundData, QueuedUnsafePayloadGossipClient},
 };
 
@@ -50,6 +55,10 @@ pub struct L1Config {
     /// - Ethereum mainnet/Sepolia: one epoch (~384 s = 32 slots × 12 s)
     /// - Devnet local L1: near-instant finality, poll aggressively (~2 s)
     pub finalized_poll_interval: Duration,
+    /// Number of L1 blocks to keep distance from the L1 head for the verifier (derivation
+    /// pipeline). When non-zero, the L1 watcher delays derivation heads by this many blocks,
+    /// providing reorg protection. Equivalent to op-node's `OP_NODE_VERIFIER_L1_CONFS`.
+    pub verifier_l1_confs: u64,
 }
 
 impl L1Config {
@@ -185,7 +194,10 @@ impl RollupNode {
         )
     }
 
-    async fn create_pipeline(&self) -> OnlinePipeline {
+    async fn create_pipeline(
+        &self,
+        l1_head_number: base_consensus_providers::L1HeadNumber,
+    ) -> OnlinePipeline {
         // Create the caching L1/L2 EL providers for derivation.
         let l1_derivation_provider = AlloyChainProvider::new_with_trust(
             self.l1_config.engine_provider.clone(),
@@ -205,6 +217,8 @@ impl RollupNode {
             OnlineBlobProvider::init(self.l1_config.beacon_client.clone()).await,
             l1_derivation_provider,
             l2_derivation_provider,
+            l1_head_number,
+            self.l1_config.verifier_l1_confs,
         )
     }
 
@@ -267,9 +281,11 @@ impl RollupNode {
     /// finalizes `safe` blocks that it has derived when L1 finalized block updates are
     /// received.
     pub async fn start(&self) -> Result<(), String> {
-        let pipeline = self.create_pipeline().await;
-        let engine_client = Arc::new(self.engine_config().build_engine_client());
-        self.start_inner(engine_client, pipeline).await
+        let l1_head_number: base_consensus_providers::L1HeadNumber = Arc::new(AtomicU64::new(0));
+        let pipeline = self.create_pipeline(Arc::clone(&l1_head_number)).await;
+        let engine_client =
+            Arc::new(self.engine_config().build_engine_client().await.map_err(|e| e.to_string())?);
+        self.start_inner(engine_client, pipeline, l1_head_number).await
     }
 
     /// Starts the rollup node service with a pre-built derivation pipeline.
@@ -280,14 +296,21 @@ impl RollupNode {
     ///
     /// Production callers should use [`Self::start`], which constructs the standard
     /// [`OnlinePipeline`] automatically.
+    ///
+    /// **Note:** `verifier_l1_confs` has no effect when using this method. The
+    /// [`ConfDepthProvider`](base_consensus_providers::ConfDepthProvider) is only wired into
+    /// pipelines constructed by [`Self::start`]. If the caller's pipeline needs confirmation
+    /// depth gating, it must enforce that in its own chain provider.
     pub async fn start_with<P>(&self, pipeline: P) -> Result<(), String>
     where
         P: Pipeline + SignalReceiver + Send + Sync + 'static,
         DerivationActor<QueuedDerivationEngineClient, P>:
             NodeActor<StartData = (), Error = DerivationError>,
     {
-        let engine_client = Arc::new(self.engine_config().build_engine_client());
-        self.start_inner(engine_client, pipeline).await
+        let l1_head_number: base_consensus_providers::L1HeadNumber = Arc::new(AtomicU64::new(0));
+        let engine_client =
+            Arc::new(self.engine_config().build_engine_client().await.map_err(|e| e.to_string())?);
+        self.start_inner(engine_client, pipeline, l1_head_number).await
     }
 
     /// Starts the rollup node with a pre-built engine client.
@@ -299,11 +322,17 @@ impl RollupNode {
         &self,
         engine_client: Arc<E>,
     ) -> Result<(), String> {
-        let pipeline = self.create_pipeline().await;
-        self.start_inner(engine_client, pipeline).await
+        let l1_head_number: base_consensus_providers::L1HeadNumber = Arc::new(AtomicU64::new(0));
+        let pipeline = self.create_pipeline(Arc::clone(&l1_head_number)).await;
+        self.start_inner(engine_client, pipeline, l1_head_number).await
     }
 
-    async fn start_inner<E, P>(&self, engine_client: Arc<E>, pipeline: P) -> Result<(), String>
+    async fn start_inner<E, P>(
+        &self,
+        engine_client: Arc<E>,
+        pipeline: P,
+        l1_head_number: base_consensus_providers::L1HeadNumber,
+    ) -> Result<(), String>
     where
         E: EngineClient + 'static,
         P: Pipeline + SignalReceiver + Send + Sync + 'static,
@@ -441,13 +470,21 @@ impl RollupNode {
         let l1_watcher = L1WatcherActor::new(
             Arc::clone(&self.config),
             AlloyL1BlockFetcher(self.l1_config.engine_provider.clone()),
-            l1_query_rx,
             l1_head_updates_tx.clone(),
             QueuedL1WatcherDerivationClient { derivation_actor_request_tx },
             Some(signer),
             cancellation.clone(),
             head_stream,
             finalized_stream,
+            self.l1_config.verifier_l1_confs,
+            l1_head_number,
+        );
+        let l1_query_processor = L1WatcherQueryProcessor::new(
+            Arc::clone(&self.config),
+            AlloyL1BlockFetcher(self.l1_config.engine_provider.clone()),
+            l1_query_rx,
+            l1_head_updates_tx.subscribe(),
+            cancellation.clone(),
         );
 
         // Create the sequencer if needed
@@ -517,6 +554,7 @@ impl RollupNode {
                 sequencer_actor.map(|s| (s, ())),
                 Some((network, ())),
                 Some((l1_watcher, ())),
+                Some((l1_query_processor, ())),
                 Some((derivation, ())),
                 Some((engine_actor, ())),
             ]

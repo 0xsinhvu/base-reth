@@ -34,7 +34,10 @@ impl EngineRpcClient for QueuedEngineRpcClient {
                 Box::new(EngineQueries::Config(config_tx)),
             ))))
             .await
-            .map_err(|_| ErrorObject::from(ErrorCode::InternalError))?;
+            .map_err(|_| {
+                error!(target: "block_engine", "Failed to enqueue engine RPC request");
+                ErrorObject::from(ErrorCode::InternalError)
+            })?;
 
         config_rx.await.map_err(|_| {
             error!(target: "block_engine", "Failed to receive config from engine rpc");
@@ -50,7 +53,10 @@ impl EngineRpcClient for QueuedEngineRpcClient {
                 Box::new(EngineQueries::State(state_tx)),
             ))))
             .await
-            .map_err(|_| ErrorObject::from(ErrorCode::InternalError))?;
+            .map_err(|_| {
+                error!(target: "block_engine", "Failed to enqueue engine RPC request");
+                ErrorObject::from(ErrorCode::InternalError)
+            })?;
 
         state_rx.await.map_err(|_| {
             error!(target: "block_engine", "Failed to receive state from engine rpc");
@@ -69,7 +75,10 @@ impl EngineRpcClient for QueuedEngineRpcClient {
                 Box::new(EngineQueries::OutputAtBlock { block, sender: output_tx }),
             ))))
             .await
-            .map_err(|_| ErrorObject::from(ErrorCode::InternalError))?;
+            .map_err(|_| {
+                error!(target: "block_engine", "Failed to enqueue engine RPC request");
+                ErrorObject::from(ErrorCode::InternalError)
+            })?;
 
         output_rx.await.map_err(|_| {
             error!(target: "block_engine", "Failed to receive output at block from engine rpc");
