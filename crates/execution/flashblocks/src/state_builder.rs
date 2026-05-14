@@ -622,7 +622,7 @@ mod tests {
         pending_blocks_builder.with_execution_time(tx_hash, 1_234);
 
         let prev_pending_blocks =
-            Arc::new(pending_blocks_builder.build().expect("should build cached pending blocks"));
+            Arc::new(pending_blocks_builder.build(None).expect("should build cached pending blocks"));
 
         let second_evm_env = evm_config.evm_env(&header).expect("failed to create evm env");
         let second_evm = evm_config.evm_with_env(InMemoryDB::default(), second_evm_env);

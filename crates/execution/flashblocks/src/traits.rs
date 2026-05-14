@@ -52,6 +52,9 @@ pub trait PendingBlocksAPI {
     /// Gets the state overrides for the pending blocks
     fn get_state_overrides(&self) -> Option<StateOverride>;
 
+    /// Gets the historical state overrides for the pending blocks
+    fn get_historical_state_overrides_at(&self, block_number: u64, block_index: u64) -> Option<StateOverride>;
+
     /// Gets logs from pending state matching the provided filter.
     fn get_pending_logs(&self, filter: &Filter) -> Vec<Log>;
 }
