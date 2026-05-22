@@ -1,11 +1,35 @@
 //! Subscription types for the `eth_` `PubSub` RPC extension
 
 use alloy_consensus::Eip658Value;
-use alloy_primitives::{Address, Bloom};
+use alloy_primitives::{Address, B256, Bloom, map::foldhash::HashMap};
 use alloy_rpc_types_eth::{Log, pubsub::SubscriptionKind};
 use base_common_rpc_types::Transaction;
 use derive_more::From;
 use serde::{Deserialize, Serialize};
+
+/// A full pending-block snapshot with every transaction's logs.
+///
+/// Emitted by the `newFlashblocksV2` subscription each time a new flashblock is
+/// processed. Unlike `newFlashblocks`, which returns an `RpcBlock` without logs,
+/// this carries the complete log set for the pending block keyed by transaction
+/// hash, so subscribers get both the block contents and all emitted logs in a
+/// single message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlashblockWithLogs {
+    /// Block number of the pending block.
+    pub number: u64,
+    /// Index of the latest flashblock within the block.
+    pub index: u64,
+    /// Block hash of the latest flashblock.
+    pub hash: B256,
+    /// Hashes of all transactions in the pending block.
+    pub transactions: Vec<B256>,
+    /// Logs emitted by each transaction, keyed by transaction hash.
+    pub logs: HashMap<B256, Vec<Log>>,
+    /// Unix-millisecond timestamp at which the node observed the flashblock.
+    pub revealed: u64,
+}
 
 /// A full transaction object with its associated logs and receipt-equivalent fields.
 ///
@@ -69,6 +93,12 @@ pub enum BaseSubscriptionKind {
     /// block, so multiple notifications may be emitted for the same block height as new
     /// flashblocks arrive.
     NewFlashblocks,
+    /// New flashblocks subscription with logs.
+    ///
+    /// Like `NewFlashblocks`, fires a notification each time a new flashblock is processed,
+    /// but emits a [`FlashblockWithLogs`] carrying the full pending block together with every
+    /// transaction's logs keyed by transaction hash, rather than a logless `RpcBlock`.
+    NewFlashblocksV2,
     /// Pending logs subscription.
     ///
     /// Returns logs from flashblocks pending state that match the given filter criteria.

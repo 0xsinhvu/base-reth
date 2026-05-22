@@ -27,7 +27,7 @@ use tracing::error;
 
 use crate::{
     FlashblocksAPI, TransactionWithLogs,
-    rpc::types::{BaseSubscriptionKind, ExtendedSubscriptionKind},
+    rpc::types::{BaseSubscriptionKind, ExtendedSubscriptionKind, FlashblockWithLogs},
 };
 
 /// Eth pub-sub RPC extension for flashblocks and standard subscriptions.
@@ -88,6 +88,29 @@ impl<Eth, FB> EthPubSub<Eth, FB> {
                 }
             };
             Some(pending_blocks.get_latest_block(true))
+        })
+    }
+
+    /// Returns a stream that yields the full pending block with all transaction logs as a
+    /// [`FlashblockWithLogs`] each time a new flashblock is processed.
+    fn new_flashblocks_v2_stream(
+        flashblocks_state: Arc<FB>,
+    ) -> impl Stream<Item = FlashblockWithLogs>
+    where
+        FB: FlashblocksAPI + Send + Sync + 'static,
+    {
+        BroadcastStream::new(flashblocks_state.subscribe_to_flashblocks()).filter_map(|result| {
+            let pending_blocks = match result {
+                Ok(blocks) => blocks,
+                Err(err) => {
+                    error!(
+                        message = "Error in flashblocks stream for v2",
+                        error = %err
+                    );
+                    return None;
+                }
+            };
+            Some(pending_blocks.get_flashblock_with_logs())
         })
     }
 
@@ -254,6 +277,13 @@ where
         match base_kind {
             BaseSubscriptionKind::NewFlashblocks => {
                 let stream = Self::new_flashblocks_stream(Arc::clone(&self.flashblocks_state));
+
+                tokio::spawn(async move {
+                    pipe_from_stream(sink, stream).await;
+                });
+            }
+            BaseSubscriptionKind::NewFlashblocksV2 => {
+                let stream = Self::new_flashblocks_v2_stream(Arc::clone(&self.flashblocks_state));
 
                 tokio::spawn(async move {
                     pipe_from_stream(sink, stream).await;

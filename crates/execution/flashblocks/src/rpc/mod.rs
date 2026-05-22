@@ -6,4 +6,6 @@ mod types;
 
 pub use eth::{BlockNumberOrTagExt, EthApiExt, EthApiOverrideServer};
 pub use pubsub::{EthPubSub, EthPubSubApiServer};
-pub use types::{BaseSubscriptionKind, ExtendedSubscriptionKind, TransactionWithLogs};
+pub use types::{
+    BaseSubscriptionKind, ExtendedSubscriptionKind, FlashblockWithLogs, TransactionWithLogs,
+};

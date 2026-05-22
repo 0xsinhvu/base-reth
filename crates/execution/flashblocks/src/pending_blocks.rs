@@ -1,4 +1,8 @@
-use std::{collections::HashMap as StdHashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap as StdHashMap,
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use alloy_consensus::{Header, Sealed, TxReceipt};
 use alloy_eips::BlockNumberOrTag;
@@ -26,7 +30,8 @@ use revm::{
 };
 
 use crate::{
-    BuildError, PendingBlocksAPI, StateProcessorError, TransactionWithLogs, metrics::Metrics,
+    BuildError, FlashblockWithLogs, PendingBlocksAPI, StateProcessorError, TransactionWithLogs,
+    metrics::Metrics,
 };
 
 /// Maximum number of historical state override snapshots retained per pending state.
@@ -47,11 +52,11 @@ pub struct PendingBlocksBuilder {
     next_position_per_block: HashMap<BlockNumber, usize>,
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
-    state_overrides: Option<StateOverride>,
-    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
     transaction_results: HashMap<B256, ExecutionResult<BaseHaltReason>>,
     execution_times: HashMap<B256, u128>,
     state_root_times: HashMap<B256, u128>,
+    state_overrides: Option<StateOverride>,
+    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
 
     bundle_state: BundleState,
 
@@ -233,8 +238,14 @@ impl PendingBlocksBuilder {
         }
     }
 
-    /// Builds the pending blocks. When `tracker` is provided, logs build timing.
-    pub fn build(mut self, tracker: Option<Instant>) -> Result<PendingBlocks, StateProcessorError> {
+    /// Builds the pending blocks.
+    ///
+    /// `received_at` is the Unix-millisecond timestamp at which the latest flashblock was
+    /// received; when provided it is recorded on the block and build timing is logged.
+    pub fn build(
+        mut self,
+        received_at: Option<u64>,
+    ) -> Result<PendingBlocks, StateProcessorError> {
         if let Some(err) = self.deferred_error {
             return Err(err.into());
         }
@@ -254,11 +265,17 @@ impl PendingBlocksBuilder {
 
         self.snapshot_historical_overrides(latest_header.number, latest_flashblock_index);
 
-        if let Some(tracker) = tracker {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let latest_flashblock_received = received_at.unwrap_or(now_ms);
+
+        if let Some(received_at) = received_at {
             info!(
                 block = latest_header.number,
                 index = latest_flashblock_index,
-                took = ?tracker.elapsed(),
+                took = %format!("{}ms", now_ms.saturating_sub(received_at)),
                 "built pending blocks"
             );
         }
@@ -267,6 +284,7 @@ impl PendingBlocksBuilder {
             earliest_header,
             latest_header,
             latest_flashblock_index,
+            latest_flashblock_received,
             flashblocks: self.flashblocks,
             transactions: self.transactions,
             account_balances: self.account_balances,
@@ -276,12 +294,12 @@ impl PendingBlocksBuilder {
             transaction_position: self.transaction_position,
             transaction_state: self.transaction_state,
             transaction_senders: self.transaction_senders,
-            state_overrides: self.state_overrides,
-            historical_state_overrides: self.historical_state_overrides,
-            bundle_state: self.bundle_state,
             transaction_results: self.transaction_results,
             execution_times: self.execution_times,
             state_root_times: self.state_root_times,
+            state_overrides: self.state_overrides,
+            historical_state_overrides: self.historical_state_overrides,
+            bundle_state: self.bundle_state,
         })
     }
 }
@@ -292,6 +310,8 @@ pub struct PendingBlocks {
     earliest_header: Sealed<Header>,
     latest_header: Sealed<Header>,
     latest_flashblock_index: u64,
+    /// Unix-millisecond timestamp at which the latest flashblock was received.
+    latest_flashblock_received: u64,
     flashblocks: Vec<Flashblock>,
     transactions: Vec<Transaction>,
 
@@ -302,11 +322,11 @@ pub struct PendingBlocks {
     transaction_position: HashMap<B256, (BlockNumber, usize)>,
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
-    state_overrides: Option<StateOverride>,
-    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
     transaction_results: HashMap<B256, ExecutionResult<BaseHaltReason>>,
     execution_times: HashMap<B256, u128>,
     state_root_times: HashMap<B256, u128>,
+    state_overrides: Option<StateOverride>,
+    historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
 
     bundle_state: BundleState,
 }
@@ -355,6 +375,12 @@ impl PendingBlocks {
     #[inline]
     pub const fn latest_flashblock_index(&self) -> u64 {
         self.latest_flashblock_index
+    }
+
+    /// Returns the Unix-millisecond timestamp at which the latest flashblock was received.
+    #[inline]
+    pub const fn latest_flashblock_received(&self) -> u64 {
+        self.latest_flashblock_received
     }
 
     /// Returns the latest header.
@@ -437,6 +463,27 @@ impl PendingBlocks {
             transactions,
             uncles: Vec::new(),
             withdrawals: Some(self.get_withdrawals().into()),
+        }
+    }
+
+    /// Returns the full pending block together with every transaction's logs.
+    pub fn get_flashblock_with_logs(&self) -> FlashblockWithLogs {
+        let transactions: Vec<B256> = self.transactions.iter().map(|tx| tx.tx_hash()).collect();
+
+        let mut logs = HashMap::with_capacity(transactions.len());
+        for tx_hash in &transactions {
+            if let Some(receipt) = self.transaction_receipts.get(tx_hash) {
+                logs.insert(*tx_hash, receipt.inner.logs().to_vec());
+            }
+        }
+
+        FlashblockWithLogs {
+            number: self.latest_header.number,
+            index: self.latest_flashblock_index,
+            hash: self.flashblocks.last().map(|fb| fb.diff.block_hash).unwrap_or_default(),
+            transactions,
+            logs,
+            revealed: self.latest_flashblock_received,
         }
     }
 
@@ -1323,5 +1370,26 @@ mod tests {
 
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0].transaction.tx_hash(), hash_a);
+    }
+
+    #[test]
+    fn get_flashblock_with_logs_includes_all_transactions_and_logs() {
+        let hash_a = B256::with_last_byte(0xAA);
+        let hash_b = B256::with_last_byte(0xBB);
+        let addr_a = Address::with_last_byte(0x0A);
+        let addr_b = Address::with_last_byte(0x0B);
+
+        let pending = build_pending_blocks_with_logs(&[(hash_a, addr_a), (hash_b, addr_b)]);
+
+        let result = pending.get_flashblock_with_logs();
+
+        assert_eq!(result.revealed, pending.latest_flashblock_received());
+        assert!(result.revealed > 0, "revealed should come from the build timestamp");
+        assert_eq!(result.index, 0);
+        assert_eq!(result.transactions, vec![hash_a, hash_b]);
+        assert_eq!(result.logs.len(), 2);
+        assert_eq!(result.logs[&hash_a].len(), 1);
+        assert_eq!(result.logs[&hash_a][0].address(), addr_a);
+        assert_eq!(result.logs[&hash_b][0].address(), addr_b);
     }
 }

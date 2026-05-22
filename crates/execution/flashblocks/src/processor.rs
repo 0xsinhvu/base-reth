@@ -1,6 +1,10 @@
 //! Flashblocks state processor.
 
-use std::{collections::{BTreeMap, HashMap as StdHashMap}, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap as StdHashMap},
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use alloy_consensus::{
     Header,
@@ -347,7 +351,10 @@ where
         prev_pending_blocks: Option<Arc<PendingBlocks>>,
         flashblocks: &[Flashblock],
     ) -> Result<Option<Arc<PendingBlocks>>> {
-        let tracker = Instant::now();
+        let received_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
 
         // BTreeMap guarantees ascending order of keys while iterating
         let mut flashblocks_per_block = BTreeMap::<BlockNumber, Vec<Flashblock>>::new();
@@ -497,6 +504,6 @@ where
         pending_blocks_builder.with_state_overrides(state_overrides);
         pending_blocks_builder.with_historical_state_overrides(historical_state_overrides);
 
-        Ok(Some(Arc::new(pending_blocks_builder.build(Some(tracker))?)))
+        Ok(Some(Arc::new(pending_blocks_builder.build(Some(received_at))?)))
     }
 }
