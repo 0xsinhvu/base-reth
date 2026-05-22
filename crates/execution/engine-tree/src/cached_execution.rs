@@ -300,7 +300,7 @@ mod tests {
             builder.with_transaction_sender(hash, Address::ZERO);
             builder.with_transaction_result(hash, stub_execution_result());
         }
-        builder.build().expect("test pending blocks should build")
+        builder.build(None).expect("test pending blocks should build")
     }
 
     const fn stub_execution_result() -> ExecutionResult<BaseHaltReason> {
