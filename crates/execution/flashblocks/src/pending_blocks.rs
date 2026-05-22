@@ -12,7 +12,7 @@ use alloy_rpc_types_engine::PayloadId;
 use alloy_rpc_types_eth::{Filter, Header as RPCHeader, Log};
 use arc_swap::Guard;
 use base_common_consensus::OpTxType;
-use base_common_evm::{BaseTxResult, OpHaltReason};
+use base_common_evm::{BaseHaltReason, BaseTxResult};
 use base_common_flashblocks::Flashblock;
 use base_common_network::Base;
 use base_common_rpc_types::{BaseTransactionReceipt, Transaction};
@@ -43,15 +43,20 @@ pub struct PendingBlocksBuilder {
     transaction_count: HashMap<Address, U256>,
     transaction_receipts: HashMap<B256, BaseTransactionReceipt>,
     transactions_by_hash: HashMap<B256, Transaction>,
+    transaction_position: HashMap<B256, (BlockNumber, usize)>,
+    next_position_per_block: HashMap<BlockNumber, usize>,
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
     state_overrides: Option<StateOverride>,
     historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
-    transaction_results: HashMap<B256, ExecutionResult<OpHaltReason>>,
+    transaction_results: HashMap<B256, ExecutionResult<BaseHaltReason>>,
     execution_times: HashMap<B256, u128>,
     state_root_times: HashMap<B256, u128>,
 
     bundle_state: BundleState,
+
+    // Deferred error from `with_transaction` (e.g. duplicate hash). Surfaced from `build()`.
+    deferred_error: Option<BuildError>,
 }
 
 impl Default for PendingBlocksBuilder {
@@ -71,6 +76,8 @@ impl PendingBlocksBuilder {
             transaction_count: HashMap::new(),
             transaction_receipts: HashMap::new(),
             transactions_by_hash: HashMap::new(),
+            transaction_position: HashMap::new(),
+            next_position_per_block: HashMap::new(),
             transaction_state: HashMap::new(),
             transaction_senders: HashMap::new(),
             transaction_results: HashMap::new(),
@@ -79,6 +86,7 @@ impl PendingBlocksBuilder {
             state_overrides: None,
             historical_state_overrides: StdHashMap::new(),
             bundle_state: BundleState::default(),
+            deferred_error: None,
         }
     }
 
@@ -97,9 +105,23 @@ impl PendingBlocksBuilder {
     }
 
     /// Stores a transaction in the builder.
+    ///
+    /// Each `tx_hash` may only be added once. A duplicate is recorded as a deferred
+    /// [`BuildError::DuplicateTransaction`] and surfaced from [`Self::build`], rather
+    /// than silently corrupting the per-block position index or the existing
+    /// per-hash maps (`transactions_by_hash`, etc.) that would otherwise overwrite.
     #[inline]
     pub fn with_transaction(&mut self, transaction: Transaction) -> &Self {
-        self.transactions_by_hash.insert(transaction.tx_hash(), transaction.clone());
+        let tx_hash = transaction.tx_hash();
+        if self.transaction_position.contains_key(&tx_hash) {
+            self.deferred_error.get_or_insert(BuildError::DuplicateTransaction { tx_hash });
+            return self;
+        }
+        let block_number = transaction.block_number.unwrap_or(0);
+        let position = self.next_position_per_block.entry(block_number).or_insert(0);
+        self.transaction_position.insert(tx_hash, (block_number, *position));
+        *position += 1;
+        self.transactions_by_hash.insert(tx_hash, transaction.clone());
         self.transactions.push(transaction);
         self
     }
@@ -168,7 +190,7 @@ impl PendingBlocksBuilder {
     pub fn with_transaction_result(
         &mut self,
         hash: B256,
-        result: ExecutionResult<OpHaltReason>,
+        result: ExecutionResult<BaseHaltReason>,
     ) -> &Self {
         self.transaction_results.insert(hash, result);
         self
@@ -213,6 +235,10 @@ impl PendingBlocksBuilder {
 
     /// Builds the pending blocks. When `tracker` is provided, logs build timing.
     pub fn build(mut self, tracker: Option<Instant>) -> Result<PendingBlocks, StateProcessorError> {
+        if let Some(err) = self.deferred_error {
+            return Err(err.into());
+        }
+
         let earliest_header = self.headers.first().cloned().ok_or(BuildError::MissingHeaders)?;
         let latest_header = self.headers.last().cloned().ok_or(BuildError::MissingHeaders)?;
 
@@ -247,6 +273,7 @@ impl PendingBlocksBuilder {
             transaction_count: self.transaction_count,
             transaction_receipts: self.transaction_receipts,
             transactions_by_hash: self.transactions_by_hash,
+            transaction_position: self.transaction_position,
             transaction_state: self.transaction_state,
             transaction_senders: self.transaction_senders,
             state_overrides: self.state_overrides,
@@ -272,11 +299,12 @@ pub struct PendingBlocks {
     transaction_count: HashMap<Address, U256>,
     transaction_receipts: HashMap<B256, BaseTransactionReceipt>,
     transactions_by_hash: HashMap<B256, Transaction>,
+    transaction_position: HashMap<B256, (BlockNumber, usize)>,
     transaction_state: HashMap<B256, EvmState>,
     transaction_senders: HashMap<B256, Address>,
     state_overrides: Option<StateOverride>,
     historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
-    transaction_results: HashMap<B256, ExecutionResult<OpHaltReason>>,
+    transaction_results: HashMap<B256, ExecutionResult<BaseHaltReason>>,
     execution_times: HashMap<B256, u128>,
     state_root_times: HashMap<B256, u128>,
 
@@ -333,6 +361,18 @@ impl PendingBlocks {
     #[inline]
     pub fn latest_header(&self) -> Sealed<Header> {
         self.latest_header.clone()
+    }
+
+    /// Returns the parent hash of the earliest pending block.
+    ///
+    /// This is the canonical block hash on top of which the cached flashblock
+    /// execution was performed. Consumers that reuse cached execution results
+    /// MUST verify their incoming `parent_block_hash` matches this value, since
+    /// during a reorg or sequencer failover two different parent hashes can
+    /// share the same block number.
+    #[inline]
+    pub fn parent_hash(&self) -> B256 {
+        self.earliest_header.parent_hash
     }
 
     /// Returns all flashblocks.
@@ -406,7 +446,10 @@ impl PendingBlocks {
     }
 
     /// Returns the execution result for a transaction.
-    pub fn get_transaction_result(&self, tx_hash: &B256) -> Option<&ExecutionResult<OpHaltReason>> {
+    pub fn get_transaction_result(
+        &self,
+        tx_hash: &B256,
+    ) -> Option<&ExecutionResult<BaseHaltReason>> {
         self.transaction_results.get(tx_hash)
     }
 
@@ -421,7 +464,7 @@ impl PendingBlocks {
     }
 
     /// Returns the receipt and state for a transaction.
-    pub fn get_op_tx_result(&self, tx_hash: &B256) -> Option<BaseTxResult<OpHaltReason, OpTxType>> {
+    pub fn get_tx_result(&self, tx_hash: &B256) -> Option<BaseTxResult<BaseHaltReason, OpTxType>> {
         let (((result, state), tx), sender) = self
             .get_transaction_result(tx_hash)
             .zip(self.get_transaction_state(tx_hash))
@@ -439,10 +482,10 @@ impl PendingBlocks {
             tx_type: tx.inner.inner.tx_type(),
         };
 
-        let op_tx_result =
+        let base_tx_result =
             BaseTxResult { inner: eth_tx_result, is_deposit: tx.inner.inner.is_deposit(), sender };
 
-        Some(op_tx_result)
+        Some(base_tx_result)
     }
 
     /// Returns a transaction by its hash.
@@ -453,6 +496,14 @@ impl PendingBlocks {
     /// Returns true if the transaction hash is in the pending blocks.
     pub fn has_transaction_hash(&self, tx_hash: &B256) -> bool {
         self.transactions_by_hash.contains_key(tx_hash)
+    }
+
+    /// Returns the per-block position (0-indexed) of a transaction within `block_number`,
+    /// or `None` if the hash is not present in the pending state for that block.
+    pub fn transaction_position(&self, block_number: BlockNumber, tx_hash: &B256) -> Option<usize> {
+        self.transaction_position
+            .get(tx_hash)
+            .and_then(|&(bn, pos)| (bn == block_number).then_some(pos))
     }
 
     /// Returns the transaction count for an address in pending state.
@@ -867,7 +918,7 @@ mod tests {
         receipt
     }
 
-    fn test_execution_result() -> ExecutionResult<OpHaltReason> {
+    fn test_execution_result() -> ExecutionResult<BaseHaltReason> {
         ExecutionResult::Success {
             reason: revm::context::result::SuccessReason::Stop,
             gas_used: 21000,
@@ -912,7 +963,7 @@ mod tests {
         let (tx_hash, pending_blocks) =
             build_pending_blocks(test_legacy_transaction(), Some(da_footprint));
 
-        let result = pending_blocks.get_op_tx_result(&tx_hash).expect("should return tx result");
+        let result = pending_blocks.get_tx_result(&tx_hash).expect("should return tx result");
 
         assert_eq!(result.inner.blob_gas_used, da_footprint);
         assert_eq!(result.inner.tx_type, OpTxType::Legacy);
@@ -925,7 +976,7 @@ mod tests {
     fn get_tx_result_reconstructs_all_fields_for_deposit_tx() {
         let (tx_hash, pending_blocks) = build_pending_blocks(test_deposit_transaction(), Some(0));
 
-        let result = pending_blocks.get_op_tx_result(&tx_hash).expect("should return tx result");
+        let result = pending_blocks.get_tx_result(&tx_hash).expect("should return tx result");
 
         assert_eq!(result.inner.blob_gas_used, 0);
         assert_eq!(result.inner.tx_type, OpTxType::Deposit);
@@ -938,9 +989,27 @@ mod tests {
     fn get_tx_result_defaults_blob_gas_to_zero_when_receipt_field_is_none() {
         let (tx_hash, pending_blocks) = build_pending_blocks(test_legacy_transaction(), None);
 
-        let result = pending_blocks.get_op_tx_result(&tx_hash).expect("should return tx result");
+        let result = pending_blocks.get_tx_result(&tx_hash).expect("should return tx result");
 
         assert_eq!(result.inner.blob_gas_used, 0);
+    }
+
+    #[test]
+    fn build_rejects_duplicate_transaction() {
+        let tx = test_legacy_transaction();
+        let tx_hash = tx.tx_hash();
+        let mut builder = PendingBlocksBuilder::default();
+        builder.with_flashblocks([test_flashblock()]);
+        builder.with_header(Sealed::new_unchecked(Header::default(), B256::ZERO));
+        builder.with_transaction(tx.clone());
+        builder.with_transaction(tx);
+        builder.with_transaction_sender(tx_hash, test_sender());
+        builder.with_transaction_state(tx_hash, Default::default());
+        builder.with_transaction_result(tx_hash, test_execution_result());
+        builder.with_receipt(tx_hash, test_receipt(tx_hash, None));
+
+        let err = builder.build(None).expect_err("build should fail on duplicate tx");
+        assert_eq!(err, StateProcessorError::Build(BuildError::DuplicateTransaction { tx_hash }));
     }
 
     #[test]
