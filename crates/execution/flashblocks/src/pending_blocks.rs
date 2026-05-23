@@ -253,8 +253,9 @@ impl PendingBlocksBuilder {
         let earliest_header = self.headers.first().cloned().ok_or(BuildError::MissingHeaders)?;
         let latest_header = self.headers.last().cloned().ok_or(BuildError::MissingHeaders)?;
 
-        let latest_flashblock_index =
-            self.flashblocks.last().map(|fb| fb.index).ok_or(BuildError::NoFlashblocks)?;
+        let latest_flashblock = self.flashblocks.last().ok_or(BuildError::NoFlashblocks)?;
+        let latest_flashblock_index = latest_flashblock.index;
+        let latest_flashblock_tx_count = latest_flashblock.diff.transactions.len() as u64;
 
         for transaction in &self.transactions {
             let tx_hash = transaction.tx_hash();
@@ -284,6 +285,7 @@ impl PendingBlocksBuilder {
             earliest_header,
             latest_header,
             latest_flashblock_index,
+            latest_flashblock_tx_count,
             latest_flashblock_received,
             flashblocks: self.flashblocks,
             transactions: self.transactions,
@@ -310,6 +312,7 @@ pub struct PendingBlocks {
     earliest_header: Sealed<Header>,
     latest_header: Sealed<Header>,
     latest_flashblock_index: u64,
+    latest_flashblock_tx_count: u64,
     /// Unix-millisecond timestamp at which the latest flashblock was received.
     latest_flashblock_received: u64,
     flashblocks: Vec<Flashblock>,
@@ -466,9 +469,18 @@ impl PendingBlocks {
         }
     }
 
-    /// Returns the full pending block together with every transaction's logs.
+    /// Returns the latest flashblock together with every transaction's logs.
+    ///
+    /// Only the transactions belonging to the latest flashblock are included: this filters
+    /// `self.transactions` to the latest block number and then takes the trailing
+    /// `latest_flashblock_tx_count` entries, which corresponds to the delta added by the most
+    /// recent flashblock.
     pub fn get_flashblock_with_logs(&self) -> FlashblockWithLogs {
-        let transactions: Vec<B256> = self.transactions.iter().map(|tx| tx.tx_hash()).collect();
+        let block_txs: Vec<&Transaction> =
+            self.get_transactions_for_block(self.latest_header.number).collect();
+        let skip = block_txs.len().saturating_sub(self.latest_flashblock_tx_count as usize);
+        let transactions: Vec<B256> =
+            block_txs.iter().skip(skip).map(|tx| tx.tx_hash()).collect();
 
         let mut logs = HashMap::with_capacity(transactions.len());
         for tx_hash in &transactions {
@@ -480,7 +492,6 @@ impl PendingBlocks {
         FlashblockWithLogs {
             number: self.latest_header.number,
             index: self.latest_flashblock_index,
-            hash: self.flashblocks.last().map(|fb| fb.diff.block_hash).unwrap_or_default(),
             transactions,
             logs,
             revealed: self.latest_flashblock_received,
@@ -991,9 +1002,12 @@ mod tests {
     /// Builds a [`PendingBlocks`] with the supplied (hash, `log_address`) pairs
     /// inserted in the given order.
     fn build_pending_blocks_with_logs(entries: &[(B256, Address)]) -> PendingBlocks {
-        let header = Sealed::new_unchecked(Header::default(), B256::ZERO);
+        let header =
+            Sealed::new_unchecked(Header { number: 1, ..Header::default() }, B256::ZERO);
+        let mut flashblock = test_flashblock();
+        flashblock.diff.transactions = vec![Bytes::new(); entries.len()];
         let mut builder = PendingBlocksBuilder::new();
-        builder.with_flashblocks([test_flashblock()]);
+        builder.with_flashblocks([flashblock]);
         builder.with_header(header);
 
         for &(hash, addr) in entries {
