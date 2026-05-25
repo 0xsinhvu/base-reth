@@ -492,6 +492,7 @@ impl PendingBlocks {
         FlashblockWithLogs {
             number: self.latest_header.number,
             index: self.latest_flashblock_index,
+            timestamp: self.latest_header.timestamp,
             transactions,
             logs,
             revealed: self.latest_flashblock_received,

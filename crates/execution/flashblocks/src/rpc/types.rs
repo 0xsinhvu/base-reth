@@ -21,6 +21,8 @@ pub struct FlashblockWithLogs {
     pub number: u64,
     /// Index of the latest flashblock within the block.
     pub index: u64,
+    /// Block timestamp (Unix seconds) carried by the pending block header.
+    pub timestamp: u64,
     /// Hashes of all transactions in the pending block.
     pub transactions: Vec<B256>,
     /// Logs emitted by each transaction, keyed by transaction hash.
