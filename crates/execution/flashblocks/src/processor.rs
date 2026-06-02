@@ -232,8 +232,8 @@ where
             ReconciliationStrategy::HandleReorg => {
                 warn!(
                     message = "reorg detected, recomputing pending flashblocks going ahead of reorg",
-                    tracked_txn_hashes = ?tracked_txn_hashes,
-                    block_txn_hashes = ?block_txn_hashes,
+                    tracked_txn_hashes = tracked_txn_hashes.len(),
+                    block_txn_hashes = block_txn_hashes.len(),
                 );
                 Metrics::pending_clear_reorg().increment(1);
 
