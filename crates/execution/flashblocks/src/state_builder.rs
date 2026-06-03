@@ -284,19 +284,37 @@ where
             Ok(ResultAndState { state, result }) => {
                 let gas_used = result.gas_used();
                 for (addr, acc) in &state {
+                    // Only record accounts that were actually modified. revm marks an account
+                    // `Touched` on any state change, so accounts that were merely read (loaded
+                    // for a balance/nonce/code/storage lookup) are skipped. Recording them would
+                    // over-report the state diff with no-op entries that diverge from the
+                    // builder's bundle-derived diff.
+                    if !acc.is_touched() {
+                        continue;
+                    }
+
                     let existing_override = self.state_overrides.entry(*addr).or_default();
                     existing_override.balance = Some(acc.info.balance);
                     existing_override.nonce = Some(acc.info.nonce);
                     existing_override.code = acc.info.code.clone().map(|code| code.bytes());
 
-                    let existing =
-                        existing_override.state_diff.get_or_insert_with(Default::default);
-                    let changed_slots = acc
-                        .storage
-                        .iter()
-                        .map(|(&key, slot)| (B256::from(key), B256::from(slot.present_value)));
+                    // Only record storage slots whose value actually changed in this
+                    // transaction (`original_value != present_value`). Slots that were only
+                    // read have `is_changed() == false` and must be excluded. Because we commit
+                    // after every transaction, each slot's `original_value` is the prior
+                    // committed value, so accumulating per-transaction changes yields the
+                    // correct net diff across flashblocks.
+                    let changed_slots: Vec<(B256, B256)> = acc
+                        .changed_storage_slots()
+                        .map(|(&key, slot)| (B256::from(key), B256::from(slot.present_value)))
+                        .collect();
 
-                    existing.extend(changed_slots);
+                    if !changed_slots.is_empty() {
+                        existing_override
+                            .state_diff
+                            .get_or_insert_with(Default::default)
+                            .extend(changed_slots);
+                    }
                 }
 
                 self.cumulative_gas_used = self
@@ -808,6 +826,123 @@ mod tests {
         assert_eq!(
             blob_gas_used, 0,
             "blob_gas_used should be 0 for deposit tx even when Jovian is active"
+        );
+    }
+
+    const CONTRACT_ADDRESS: Address =
+        address!("0x00000000000000000000000000000000000c0ffe");
+
+    /// Builds a legacy tx from `Address::ZERO` calling `to`.
+    fn create_legacy_tx_to(to: Address) -> alloy_consensus::transaction::Recovered<BaseTxEnvelope> {
+        let tx = alloy_consensus::TxLegacy {
+            chain_id: Some(8453),
+            nonce: 0,
+            gas_price: 1_000_000_000,
+            gas_limit: 100_000,
+            to: TxKind::Call(to),
+            value: U256::ZERO,
+            input: Default::default(),
+        };
+
+        let envelope = BaseTxEnvelope::Legacy(Signed::new_unchecked(
+            tx,
+            alloy_primitives::Signature::test_signature(),
+            B256::ZERO,
+        ));
+
+        alloy_consensus::transaction::Recovered::new_unchecked(envelope, Address::ZERO)
+    }
+
+    /// Seeds `db` with a funded sender (`Address::ZERO`) and a contract at
+    /// [`CONTRACT_ADDRESS`] running `code`, with storage slot 0 preset to `slot0`.
+    fn seed_sender_and_contract(db: &mut InMemoryDB, code: Vec<u8>, slot0: U256) {
+        db.insert_account_info(
+            Address::ZERO,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u128),
+                ..Default::default()
+            },
+        );
+
+        let bytecode = Bytecode::new_raw(code.into());
+        let code_hash = bytecode.hash_slow();
+        db.insert_account_info(
+            CONTRACT_ADDRESS,
+            AccountInfo { code: Some(bytecode), code_hash, nonce: 1, ..Default::default() },
+        );
+        db.insert_account_storage(CONTRACT_ADDRESS, U256::ZERO, slot0)
+            .expect("failed to seed contract storage");
+    }
+
+    fn build_state_overrides(db: InMemoryDB) -> StateOverride {
+        let chain_spec = Arc::new(BaseChainSpecBuilder::base_mainnet().build());
+        let header = Header {
+            timestamp: 100,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1_000_000_000),
+            beneficiary: address!("0x000000000000000000000000000000000000beef"),
+            ..Default::default()
+        };
+        let evm_config = BaseEvmConfig::base(Arc::clone(&chain_spec));
+        let evm_env = evm_config.evm_env(&header).expect("failed to create evm env");
+        let evm = evm_config.evm_with_env(db, evm_env);
+        let pending_block = Block { header, body: Default::default() };
+
+        let mut builder = PendingStateBuilder::new(
+            (*chain_spec).clone(),
+            evm,
+            pending_block,
+            None,
+            L1BlockInfo::default(),
+            StateOverride::default(),
+        );
+
+        builder
+            .execute_transaction(0, create_legacy_tx_to(CONTRACT_ADDRESS))
+            .expect("transaction execution failed");
+
+        builder.into_db_and_state_overrides().1
+    }
+
+    #[test]
+    fn read_only_slot_is_excluded_from_state_diff() {
+        // PUSH1 0x00; SLOAD; POP; STOP -- reads slot 0 without modifying it.
+        let code = vec![0x60, 0x00, 0x54, 0x50, 0x00];
+        let mut db = InMemoryDB::default();
+        seed_sender_and_contract(&mut db, code, U256::from(0x42));
+
+        let state_overrides = build_state_overrides(db);
+
+        let recorded = state_overrides
+            .get(&CONTRACT_ADDRESS)
+            .and_then(|o| o.state_diff.as_ref())
+            .is_some_and(|diff| diff.contains_key(&B256::ZERO));
+
+        assert!(
+            !recorded,
+            "a slot that was only read (SLOAD) must not appear in the state diff"
+        );
+    }
+
+    #[test]
+    fn written_slot_is_included_in_state_diff() {
+        // PUSH1 0x07; PUSH1 0x00; SSTORE; STOP -- writes 7 to slot 0.
+        let code = vec![0x60, 0x07, 0x60, 0x00, 0x55, 0x00];
+        let mut db = InMemoryDB::default();
+        seed_sender_and_contract(&mut db, code, U256::ZERO);
+
+        let state_overrides = build_state_overrides(db);
+
+        let written = state_overrides
+            .get(&CONTRACT_ADDRESS)
+            .and_then(|o| o.state_diff.as_ref())
+            .and_then(|diff| diff.get(&B256::ZERO))
+            .copied();
+
+        assert_eq!(
+            written,
+            Some(B256::from(U256::from(7))),
+            "a slot that was written (SSTORE) must appear in the state diff with its new value"
         );
     }
 }
