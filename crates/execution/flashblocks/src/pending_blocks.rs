@@ -215,17 +215,20 @@ impl PendingBlocksBuilder {
         self
     }
 
-    /// Snapshots the current state overrides (state_diff only, stripped of balance/nonce/code)
-    /// into the historical map keyed by `(block_number, flashblock_index)`, and prunes entries
-    /// beyond [`MAX_HISTORICAL_OVERRIDES`].
+    /// Snapshots the current state overrides into the historical map keyed by
+    /// `(block_number, flashblock_index)`, and prunes entries beyond
+    /// [`MAX_HISTORICAL_OVERRIDES`].
+    ///
+    /// The full override (balance, nonce, code, and storage `state_diff`) is preserved for every
+    /// account that changed. Only accounts with nothing changed at all are dropped.
     fn snapshot_historical_overrides(&mut self, block_number: u64, flashblock_index: u64) {
         let mut cutoff = self.state_overrides.clone().unwrap_or_default();
-        cutoff.retain(|_, acc| acc.state_diff.as_ref().is_some_and(|d| !d.is_empty()));
-        for acc in cutoff.values_mut() {
-            acc.balance = None;
-            acc.nonce = None;
-            acc.code = None;
-        }
+        cutoff.retain(|_, acc| {
+            acc.balance.is_some()
+                || acc.nonce.is_some()
+                || acc.code.is_some()
+                || acc.state_diff.as_ref().is_some_and(|d| !d.is_empty())
+        });
 
         self.historical_state_overrides.insert((block_number, flashblock_index), cutoff);
 
