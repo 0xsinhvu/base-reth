@@ -78,7 +78,7 @@ use tokio::{sync::broadcast::error::RecvError, time};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tracing::{debug, trace, warn};
 
-use crate::{FlashblocksAPI, PendingBlocksAPI, metrics::Metrics};
+use crate::{FlashblocksAPI, OverlayCall, PendingBlocksAPI, metrics::Metrics};
 
 /// Max configured timeout for `eth_sendRawTransactionSync` in milliseconds.
 const MAX_TIMEOUT_SEND_RAW_TX_SYNC_MS: u64 = 6_000;
@@ -151,6 +151,17 @@ pub trait EthApiOverride {
         &self,
         opts: SimulatePayload<BaseTransactionRequest>,
         block_number: Option<BlockId>,
+    ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Base>>>>;
+
+    /// Simulates transactions on top of the latest pending flashblock state.
+    ///
+    /// Behaves like `eth_simulateV1`, but executes against the in-memory flashblock bundle via
+    /// [`PendingBundleOverlay`](crate::PendingBundleOverlay) instead of the chain tip, so the
+    /// pending block's effects are visible without converting the diff into state overrides.
+    #[method(name = "fbSimulateV1")]
+    async fn fb_simulate_v1(
+        &self,
+        opts: SimulatePayload<BaseTransactionRequest>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Base>>>>;
 
     /// Returns logs matching the filter, including pending flashblock logs.
@@ -498,6 +509,22 @@ where
         EthCall::simulate_v1(&self.eth_api, payload, Some(block_id)).await.map_err(Into::into)
     }
 
+    async fn fb_simulate_v1(
+        &self,
+        opts: SimulatePayload<BaseTransactionRequest>,
+    ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Eth::NetworkTypes>>>> {
+        debug!(message = "rpc::fb_simulate_v1");
+        Metrics::rpc_fb_simulate_v1().increment(1);
+
+        // Without pending flashblock state there is nothing to overlay, so behave exactly like
+        // `eth_simulateV1` at the chain tip.
+        let Some(pending) = self.flashblocks_state.get_pending_blocks().as_ref().cloned() else {
+            return EthCall::simulate_v1(&self.eth_api, opts, None).await.map_err(Into::into);
+        };
+
+        OverlayCall::simulate_v1(&self.eth_api, pending, opts).await
+    }
+
     async fn get_logs(&self, filter: Filter) -> RpcResult<Vec<Log>> {
         debug!(
             message = "rpc::get_logs",
@@ -606,10 +633,8 @@ where
         let state_overrides = pending_blocks
             .get_historical_state_overrides_at(block_number, block_index)
             .ok_or_else(|| {
-                let err: ErrorObjectOwned = EthApiError::HeaderNotFound(
-                    BlockId::number(block_number),
-                )
-                .into();
+                let err: ErrorObjectOwned =
+                    EthApiError::HeaderNotFound(BlockId::number(block_number)).into();
                 err
             })?;
 

@@ -178,7 +178,10 @@ impl PendingBlocksBuilder {
 
     /// Merges historical state overrides into the builder (additive, unlike `with_state_overrides`
     /// which replaces).
-    pub fn with_historical_state_overrides(&mut self, historical_state_overrides: StdHashMap<(u64, u64), StateOverride>) -> &Self {
+    pub fn with_historical_state_overrides(
+        &mut self,
+        historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
+    ) -> &Self {
         self.historical_state_overrides.extend(historical_state_overrides);
         self
     }
@@ -245,10 +248,7 @@ impl PendingBlocksBuilder {
     ///
     /// `received_at` is the Unix-millisecond timestamp at which the latest flashblock was
     /// received; when provided it is recorded on the block and build timing is logged.
-    pub fn build(
-        mut self,
-        received_at: Option<u64>,
-    ) -> Result<PendingBlocks, StateProcessorError> {
+    pub fn build(mut self, received_at: Option<u64>) -> Result<PendingBlocks, StateProcessorError> {
         if let Some(err) = self.deferred_error {
             return Err(err.into());
         }
@@ -269,10 +269,8 @@ impl PendingBlocksBuilder {
 
         self.snapshot_historical_overrides(latest_header.number, latest_flashblock_index);
 
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms =
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
         let latest_flashblock_received = received_at.unwrap_or(now_ms);
 
         if let Some(received_at) = received_at {
@@ -422,6 +420,16 @@ impl PendingBlocks {
         self.transaction_senders.get(tx_hash).copied()
     }
 
+    /// Returns a reference to the accumulated bundle state.
+    ///
+    /// Unlike [`Self::get_bundle_state`], this borrows the bundle without cloning, which is what
+    /// the lazy [`PendingBundleOverlay`](crate::PendingBundleOverlay) needs to serve reads from
+    /// the in-memory diff.
+    #[inline]
+    pub const fn bundle_state_ref(&self) -> &BundleState {
+        &self.bundle_state
+    }
+
     /// Returns a clone of the bundle state.
     ///
     /// NOTE: This clones the entire `BundleState`, which contains a `HashMap` of all touched
@@ -482,8 +490,7 @@ impl PendingBlocks {
         let block_txs: Vec<&Transaction> =
             self.get_transactions_for_block(self.latest_header.number).collect();
         let skip = block_txs.len().saturating_sub(self.latest_flashblock_tx_count as usize);
-        let transactions: Vec<B256> =
-            block_txs.iter().skip(skip).map(|tx| tx.tx_hash()).collect();
+        let transactions: Vec<B256> = block_txs.iter().skip(skip).map(|tx| tx.tx_hash()).collect();
 
         let mut logs = HashMap::with_capacity(transactions.len());
         for tx_hash in &transactions {
@@ -584,7 +591,7 @@ impl PendingBlocks {
     }
 
     /// Returns a reference to the historical state overrides.
-    pub fn get_historical_state_overrides(&self) -> &StdHashMap<(u64, u64), StateOverride> {
+    pub const fn get_historical_state_overrides(&self) -> &StdHashMap<(u64, u64), StateOverride> {
         &self.historical_state_overrides
     }
 
@@ -754,7 +761,11 @@ impl PendingBlocksAPI for Guard<Option<Arc<PendingBlocks>>> {
         self.as_ref().map(|pb| pb.get_state_overrides()).unwrap_or_default()
     }
 
-    fn get_historical_state_overrides_at(&self, block_number: u64, block_index: u64) -> Option<StateOverride> {
+    fn get_historical_state_overrides_at(
+        &self,
+        block_number: u64,
+        block_index: u64,
+    ) -> Option<StateOverride> {
         self.as_ref().and_then(|pb| {
             pb.get_historical_state_overrides().get(&(block_number, block_index)).cloned()
         })

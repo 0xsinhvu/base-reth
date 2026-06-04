@@ -42,6 +42,8 @@ base_metrics::define_metrics! {
     rpc_estimate_gas: counter,
     #[describe("Count of times flashblocks simulate_v1 is called")]
     rpc_simulate_v1: counter,
+    #[describe("Count of times flashblocks fb_simulate_v1 is called")]
+    rpc_fb_simulate_v1: counter,
     #[describe("Count of times flashblocks get_logs is called")]
     rpc_get_logs: counter,
     #[describe("Count of times flashblocks get_block_transaction_count_by_number is called")]
