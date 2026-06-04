@@ -27,7 +27,7 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee_types::ErrorObjectOwned;
 use reth_errors::RethError;
 use reth_evm::{ConfigureEvm, Evm, env::BlockEnvironment, execute::BlockBuilder};
-use reth_primitives::{Account, Bytecode};
+use reth_primitives_traits::{Account, Bytecode};
 use reth_provider::ProviderResult;
 use reth_revm::{
     database::{EvmStateProvider, StateProviderDatabase},

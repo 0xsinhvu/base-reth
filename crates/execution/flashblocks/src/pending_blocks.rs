@@ -1140,7 +1140,7 @@ mod tests {
                 deposit_receipt_version: Some(1),
             });
         builder.with_receipt(tx_hash, receipt);
-        let pending_blocks = builder.build().expect("should build pending blocks");
+        let pending_blocks = builder.build(None).expect("should build pending blocks");
 
         let result = pending_blocks.get_tx_result(&tx_hash).expect("should return tx result");
 
