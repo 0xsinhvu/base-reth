@@ -296,7 +296,17 @@ where
                     let existing_override = self.state_overrides.entry(*addr).or_default();
                     existing_override.balance = Some(acc.info.balance);
                     existing_override.nonce = Some(acc.info.nonce);
-                    existing_override.code = acc.info.code.clone().map(|code| code.bytes());
+
+                    // Code only changes on contract creation. revm loads the full bytecode into
+                    // `acc.info.code` for any contract that is merely invoked, so recording it on
+                    // every touch would copy the entire bytecode into the override (and into every
+                    // cloned historical snapshot) for no reason. Record it only when the account is
+                    // created this transaction, and never clear it on subsequent touches: a later
+                    // tx may re-call a contract created earlier in this flashblock, and clearing
+                    // would wipe the code recorded then.
+                    if acc.is_created() {
+                        existing_override.code = acc.info.code.clone().map(|code| code.bytes());
+                    }
 
                     // Only record storage slots whose value actually changed in this
                     // transaction (`original_value != present_value`). Slots that were only
