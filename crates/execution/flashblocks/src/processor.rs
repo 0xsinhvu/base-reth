@@ -22,7 +22,7 @@ use base_execution_evm::{BaseEvmConfig, BaseNextBlockEnvAttributes};
 use rayon::prelude::*;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_evm::ConfigureEvm;
-use reth_primitives::RecoveredBlock;
+use reth_primitives_traits::RecoveredBlock;
 use reth_provider::{BlockReaderIdExt, StateProviderFactory};
 use reth_revm::{State, database::StateProviderDatabase};
 use revm_database::states::bundle_state::BundleRetention;
@@ -39,6 +39,7 @@ use crate::{
 };
 
 /// Messages consumed by the state processor.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum StateUpdate {
     /// New canonical block to reconcile against pending state.
