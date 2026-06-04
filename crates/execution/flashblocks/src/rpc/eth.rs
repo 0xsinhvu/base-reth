@@ -136,6 +136,24 @@ pub trait EthApiOverride {
         block_overrides: Option<Box<BlockOverrides>>,
     ) -> RpcResult<alloy_primitives::Bytes>;
 
+    /// Executes a call on top of a pending flashblock bundle.
+    ///
+    /// Behaves like `eth_call`, but executes against the in-memory flashblock bundle via
+    /// [`PendingBundleOverlay`](crate::PendingBundleOverlay) instead of the chain tip, so the
+    /// pending block's effects are visible without converting the diff into state overrides.
+    ///
+    /// When `block_number` and `block_index` are both supplied, the bundle captured at that
+    /// flashblock snapshot is used; otherwise the latest pending bundle is used.
+    #[method(name = "fbCall")]
+    async fn fb_call(
+        &self,
+        transaction: BaseTransactionRequest,
+        state_overrides: Option<StateOverride>,
+        block_overrides: Option<Box<BlockOverrides>>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
+    ) -> RpcResult<alloy_primitives::Bytes>;
+
     /// Estimates gas with flashblock state support.
     #[method(name = "estimateGas")]
     async fn estimate_gas(
@@ -440,6 +458,36 @@ where
         )
         .await
         .map_err(Into::into)
+    }
+
+    async fn fb_call(
+        &self,
+        transaction: BaseTransactionRequest,
+        state_overrides: Option<StateOverride>,
+        block_overrides: Option<Box<BlockOverrides>>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
+    ) -> RpcResult<alloy_primitives::Bytes> {
+        debug!(
+            message = "rpc::fb_call",
+            transaction = ?transaction,
+            block_number = ?block_number,
+            block_index = ?block_index,
+        );
+        Metrics::rpc_fb_call().increment(1);
+
+        let overrides = EvmOverrides::new(state_overrides, block_overrides);
+
+        // Without pending flashblock state there is nothing to overlay, so behave exactly like
+        // `eth_call` at the chain tip.
+        let Some(pending) = self.flashblocks_state.get_pending_blocks().as_ref().cloned() else {
+            return EthCall::call(&self.eth_api, transaction, None, overrides)
+                .await
+                .map_err(Into::into);
+        };
+
+        OverlayCall::call(&self.eth_api, pending, transaction, overrides, block_number, block_index)
+            .await
     }
 
     async fn estimate_gas(

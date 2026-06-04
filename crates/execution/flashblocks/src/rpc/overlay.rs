@@ -19,8 +19,11 @@ use alloy_consensus::BlockHeader;
 use alloy_eips::BlockId;
 use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides};
 use alloy_network::TransactionBuilder;
-use alloy_primitives::{Address, B256, BlockNumber, StorageKey, StorageValue, U256};
-use alloy_rpc_types::simulate::{SimBlock, SimulatePayload, SimulatedBlock};
+use alloy_primitives::{Address, B256, BlockNumber, Bytes, StorageKey, StorageValue, U256};
+use alloy_rpc_types::{
+    simulate::{SimBlock, SimulatePayload, SimulatedBlock},
+    state::EvmOverrides,
+};
 use base_common_network::Base;
 use base_common_rpc_types::BaseTransactionRequest;
 use jsonrpsee::core::RpcResult;
@@ -33,7 +36,7 @@ use reth_revm::{
     database::{EvmStateProvider, StateProviderDatabase},
     db::{BundleState, State},
 };
-use reth_rpc_eth_api::{AsEthApiError, RpcBlock, helpers::FullEthApi};
+use reth_rpc_eth_api::{AsEthApiError, FromEvmError, RpcBlock, helpers::FullEthApi};
 use reth_rpc_eth_types::{
     EthApiError,
     error::FromEthApiError,
@@ -122,6 +125,64 @@ impl<P: EvmStateProvider> EvmStateProvider for PendingBundleOverlay<P> {
 pub struct OverlayCall;
 
 impl OverlayCall {
+    /// `eth_fbCall`: executes `request` on top of a pending flashblock bundle.
+    ///
+    /// This is the `eth_call` counterpart: like [`Self::simulate_v1`], it layers the pending
+    /// [`BundleState`](revm::database::BundleState) lazily over the canonical state via
+    /// [`PendingBundleOverlay`] rather than materializing the diff as state overrides, then runs
+    /// the same single-call execution as reth's `eth_call`.
+    ///
+    /// When both `block_number` and `block_index` are supplied, the bundle captured at that
+    /// flashblock snapshot is used (returning [`EthApiError::HeaderNotFound`] if it is no longer
+    /// retained); otherwise the latest bundle is used. The simulation base block is always the
+    /// [`canonical_block_number`](PendingBlocks::canonical_block_number) the bundle was built on.
+    pub async fn call<Eth>(
+        eth_api: &Eth,
+        pending: Arc<PendingBlocks>,
+        request: BaseTransactionRequest,
+        overrides: EvmOverrides,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
+    ) -> RpcResult<Bytes>
+    where
+        Eth: FullEthApi<NetworkTypes = Base> + Clone + Send + Sync + 'static,
+        jsonrpsee_types::error::ErrorObject<'static>: From<Eth::Error>,
+    {
+        // Pick the bundle to overlay: a specific flashblock snapshot when both coordinates are
+        // given, otherwise the latest.
+        let bundle = match (block_number, block_index) {
+            (Some(number), Some(index)) => {
+                pending.get_historical_bundle_state_at(number, index).ok_or_else(|| {
+                    let err: ErrorObjectOwned =
+                        EthApiError::HeaderNotFound(BlockId::number(number)).into();
+                    err
+                })?
+            }
+            _ => pending.latest_bundle_state(),
+        };
+
+        // Execute on top of the canonical block the flashblock bundle was built on; the bundle
+        // diff is layered over that canonical state by `PendingBundleOverlay`.
+        let block_id: BlockId = pending.canonical_block_number().into();
+        let (evm_env, at) = eth_api.evm_env_at(block_id).await.map_err(Into::into)?;
+
+        eth_api
+            .spawn_blocking_io_fut(move |this| async move {
+                let state = this.state_at_block_id(at).await?;
+                let overlay = PendingBundleOverlay::new(state, bundle);
+                let mut db =
+                    State::builder().with_database(StateProviderDatabase::new(overlay)).build();
+
+                let (evm_env, tx_env) =
+                    this.prepare_call_env(evm_env, request, &mut db, overrides)?;
+                let res = this.transact(&mut db, evm_env, tx_env)?;
+
+                Eth::Error::ensure_success(res.result)
+            })
+            .await
+            .map_err(Into::into)
+    }
+
     /// `eth_fbSimulateV1`: simulates `opts` on top of a pending flashblock bundle.
     ///
     /// This is the `eth_simulateV1` counterpart, but instead of converting the flashblock diff
