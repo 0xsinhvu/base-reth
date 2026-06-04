@@ -400,6 +400,11 @@ where
                 pending_blocks.get_historical_state_overrides().clone()
             });
 
+        let historical_bundle_states =
+            prev_pending_blocks.as_ref().map_or_else(StdHashMap::new, |pending_blocks| {
+                pending_blocks.get_historical_bundle_states().clone()
+            });
+
         for (_block_number, flashblocks) in flashblocks_per_block {
             // Use BlockAssembler to reconstruct the block from flashblocks
             let assembled = BlockAssembler::assemble(&flashblocks)?;
@@ -501,6 +506,7 @@ where
         pending_blocks_builder.with_bundle_state(db.take_bundle());
         pending_blocks_builder.with_state_overrides(state_overrides);
         pending_blocks_builder.with_historical_state_overrides(historical_state_overrides);
+        pending_blocks_builder.with_historical_bundle_states(historical_bundle_states);
 
         Ok(Some(Arc::new(pending_blocks_builder.build(Some(received_at))?)))
     }

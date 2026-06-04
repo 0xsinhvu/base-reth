@@ -31,7 +31,7 @@ use reth_primitives::{Account, Bytecode};
 use reth_provider::ProviderResult;
 use reth_revm::{
     database::{EvmStateProvider, StateProviderDatabase},
-    db::State,
+    db::{BundleState, State},
 };
 use reth_rpc_eth_api::{AsEthApiError, RpcBlock, helpers::FullEthApi};
 use reth_rpc_eth_types::{
@@ -53,13 +53,14 @@ use crate::PendingBlocks;
 #[derive(Debug, Clone)]
 pub struct PendingBundleOverlay<P> {
     inner: P,
-    pending: Arc<PendingBlocks>,
+    bundle: Arc<BundleState>,
 }
 
 impl<P> PendingBundleOverlay<P> {
-    /// Creates a new overlay over `inner` using the diff held by `pending`.
-    pub const fn new(inner: P, pending: Arc<PendingBlocks>) -> Self {
-        Self { inner, pending }
+    /// Creates a new overlay over `inner` that serves reads from `bundle` before falling back to
+    /// `inner`.
+    pub const fn new(inner: P, bundle: Arc<BundleState>) -> Self {
+        Self { inner, bundle }
     }
 }
 
@@ -75,7 +76,7 @@ fn to_reth_account(info: AccountInfo) -> Account {
 
 impl<P: EvmStateProvider> EvmStateProvider for PendingBundleOverlay<P> {
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
-        if let Some(account) = self.pending.bundle_state_ref().account(address) {
+        if let Some(account) = self.bundle.account(address) {
             // `info` is `None` for an account that was destroyed / does not exist.
             return Ok(account.account_info().map(to_reth_account));
         }
@@ -88,7 +89,7 @@ impl<P: EvmStateProvider> EvmStateProvider for PendingBundleOverlay<P> {
     }
 
     fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
-        if let Some(bytecode) = self.pending.bundle_state_ref().contracts.get(code_hash) {
+        if let Some(bytecode) = self.bundle.contracts.get(code_hash) {
             return Ok(Some(Bytecode(bytecode.clone())));
         }
         self.inner.bytecode_by_hash(code_hash)
@@ -99,7 +100,7 @@ impl<P: EvmStateProvider> EvmStateProvider for PendingBundleOverlay<P> {
         account: Address,
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>> {
-        if let Some(bundle_account) = self.pending.bundle_state_ref().account(&account) {
+        if let Some(bundle_account) = self.bundle.account(&account) {
             // `storage_slot` returns the post-state value for written slots, zero when the
             // account's storage is fully known (created/destroyed this block), or `None` when the
             // slot is untouched on an otherwise-changed account — in which case we read canonical.
@@ -121,17 +122,25 @@ impl<P: EvmStateProvider> EvmStateProvider for PendingBundleOverlay<P> {
 pub struct OverlayCall;
 
 impl OverlayCall {
-    /// `eth_fbSimulateV1`: simulates `opts` on top of the given pending flashblock state.
+    /// `eth_fbSimulateV1`: simulates `opts` on top of a pending flashblock bundle.
     ///
     /// This is the `eth_simulateV1` counterpart, but instead of converting the flashblock diff
     /// into a [`StateOverride`](alloy_rpc_types_eth::state::StateOverride) and materializing it on
     /// every call, it layers the pending [`BundleState`](revm::database::BundleState) lazily over
     /// the canonical state the bundle was built on using [`PendingBundleOverlay`], then runs the
     /// same per-block simulation loop as reth's `eth_simulateV1`.
+    ///
+    /// When both `block_number` and `block_index` are supplied, the bundle captured at that
+    /// flashblock snapshot is used (returning [`EthApiError::HeaderNotFound`] if it is no longer
+    /// retained); otherwise the latest bundle is used. Every snapshot of a given pending sequence
+    /// is a diff over the same canonical parent, so the simulation base block is always
+    /// [`canonical_block_number`](PendingBlocks::canonical_block_number) regardless.
     pub async fn simulate_v1<Eth>(
         eth_api: &Eth,
         pending: Arc<PendingBlocks>,
         opts: SimulatePayload<BaseTransactionRequest>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Eth::NetworkTypes>>>>
     where
         Eth: FullEthApi<NetworkTypes = Base> + Clone + Send + Sync + 'static,
@@ -143,6 +152,19 @@ impl OverlayCall {
         if opts.block_state_calls.is_empty() {
             return Err(EthApiError::InvalidParams("calls are empty.".to_string()).into());
         }
+
+        // Pick the bundle to overlay: a specific flashblock snapshot when both coordinates are
+        // given, otherwise the latest.
+        let bundle = match (block_number, block_index) {
+            (Some(number), Some(index)) => {
+                pending.get_historical_bundle_state_at(number, index).ok_or_else(|| {
+                    let err: ErrorObjectOwned =
+                        EthApiError::HeaderNotFound(BlockId::number(number)).into();
+                    err
+                })?
+            }
+            _ => pending.latest_bundle_state(),
+        };
 
         // Simulate on top of the canonical block the flashblock bundle was built on; the bundle
         // diff is layered over that canonical state by `PendingBundleOverlay`.
@@ -158,7 +180,7 @@ impl OverlayCall {
         eth_api
             .spawn_blocking_io_fut(move |this| async move {
                 let state = this.state_at_block_id(block_id).await?;
-                let overlay = PendingBundleOverlay::new(state, pending);
+                let overlay = PendingBundleOverlay::new(state, bundle);
                 let mut db =
                     State::builder().with_database(StateProviderDatabase::new(overlay)).build();
 
@@ -478,7 +500,7 @@ mod tests {
             .insert(account, Account { nonce: 0, balance: U256::from(1), bytecode_hash: None });
         canonical.storage.insert((account, slot), U256::from(9));
 
-        let overlay = PendingBundleOverlay::new(canonical, pending);
+        let overlay = PendingBundleOverlay::new(canonical, pending.latest_bundle_state());
 
         // Balance + slot come from the bundle, not canonical.
         assert_eq!(overlay.basic_account(&account).unwrap().unwrap().balance, U256::from(500));
@@ -502,12 +524,29 @@ mod tests {
         canonical.storage.insert((other, other_slot), U256::from(77));
         canonical.storage.insert((changed, untouched_slot), U256::from(55));
 
-        let overlay = PendingBundleOverlay::new(canonical, pending);
+        let overlay = PendingBundleOverlay::new(canonical, pending.latest_bundle_state());
 
         // Account not in the bundle: canonical.
         assert_eq!(overlay.basic_account(&other).unwrap().unwrap().balance, U256::from(123));
         assert_eq!(overlay.storage(other, other_slot).unwrap(), Some(U256::from(77)));
         // Untouched slot on a changed account: canonical.
         assert_eq!(overlay.storage(changed, untouched_slot).unwrap(), Some(U256::from(55)));
+    }
+
+    #[test]
+    fn historical_bundle_snapshot_is_retained_and_keyed() {
+        let account = addr(1);
+        let slot = B256::from(U256::from(7));
+        // `pending_with_change` builds a single flashblock at block 1, index 0.
+        let pending = pending_with_change(account, 500, slot, 42, AccountStatus::Changed);
+
+        // The snapshot at the latest (block, index) is retained and matches the latest bundle.
+        let snapshot = pending.get_historical_bundle_state_at(1, 0).expect("snapshot retained");
+        assert!(snapshot.account(&account).is_some());
+        assert!(Arc::ptr_eq(&snapshot, &pending.latest_bundle_state()));
+
+        // Coordinates with no snapshot return `None`.
+        assert!(pending.get_historical_bundle_state_at(1, 9).is_none());
+        assert!(pending.get_historical_bundle_state_at(2, 0).is_none());
     }
 }

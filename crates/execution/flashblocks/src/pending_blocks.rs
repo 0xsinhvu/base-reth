@@ -57,6 +57,7 @@ pub struct PendingBlocksBuilder {
     state_root_times: HashMap<B256, u128>,
     state_overrides: Option<StateOverride>,
     historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
+    historical_bundle_states: StdHashMap<(u64, u64), Arc<BundleState>>,
 
     bundle_state: BundleState,
 
@@ -90,6 +91,7 @@ impl PendingBlocksBuilder {
             state_root_times: HashMap::new(),
             state_overrides: None,
             historical_state_overrides: StdHashMap::new(),
+            historical_bundle_states: StdHashMap::new(),
             bundle_state: BundleState::default(),
             deferred_error: None,
         }
@@ -186,6 +188,16 @@ impl PendingBlocksBuilder {
         self
     }
 
+    /// Merges historical bundle-state snapshots into the builder (additive, carried forward from
+    /// the previous pending blocks).
+    pub fn with_historical_bundle_states(
+        &mut self,
+        historical_bundle_states: StdHashMap<(u64, u64), Arc<BundleState>>,
+    ) -> &Self {
+        self.historical_bundle_states.extend(historical_bundle_states);
+        self
+    }
+
     /// Sets the accumulated bundle state.
     #[inline]
     pub fn with_bundle_state(&mut self, bundle_state: BundleState) -> &Self {
@@ -218,13 +230,20 @@ impl PendingBlocksBuilder {
         self
     }
 
-    /// Snapshots the current state overrides into the historical map keyed by
-    /// `(block_number, flashblock_index)`, and prunes entries beyond
-    /// [`MAX_HISTORICAL_OVERRIDES`].
+    /// Snapshots the current state overrides and bundle state into the historical maps keyed by
+    /// `(block_number, flashblock_index)`, and prunes entries beyond [`MAX_HISTORICAL_OVERRIDES`].
     ///
     /// The full override (balance, nonce, code, and storage `state_diff`) is preserved for every
-    /// account that changed. Only accounts with nothing changed at all are dropped.
-    fn snapshot_historical_overrides(&mut self, block_number: u64, flashblock_index: u64) {
+    /// account that changed. Only accounts with nothing changed at all are dropped. The bundle
+    /// snapshot shares the same `Arc` as the latest bundle, so retaining it is cheap.
+    ///
+    /// Both maps are keyed and pruned identically, so a key present in one is present in the other.
+    fn snapshot_historical(
+        &mut self,
+        block_number: u64,
+        flashblock_index: u64,
+        bundle_state: Arc<BundleState>,
+    ) {
         let mut cutoff = self.state_overrides.clone().unwrap_or_default();
         cutoff.retain(|_, acc| {
             acc.balance.is_some()
@@ -234,12 +253,14 @@ impl PendingBlocksBuilder {
         });
 
         self.historical_state_overrides.insert((block_number, flashblock_index), cutoff);
+        self.historical_bundle_states.insert((block_number, flashblock_index), bundle_state);
 
         if self.historical_state_overrides.len() > MAX_HISTORICAL_OVERRIDES {
             let mut keys: Vec<_> = self.historical_state_overrides.keys().copied().collect();
             keys.sort_by(|a, b| b.cmp(a));
             for key in keys.into_iter().skip(MAX_HISTORICAL_OVERRIDES) {
                 self.historical_state_overrides.remove(&key);
+                self.historical_bundle_states.remove(&key);
             }
         }
     }
@@ -267,7 +288,14 @@ impl PendingBlocksBuilder {
             }
         }
 
-        self.snapshot_historical_overrides(latest_header.number, latest_flashblock_index);
+        // Share a single `Arc` between the latest bundle and its historical snapshot so retaining
+        // it costs no extra clone.
+        let bundle_state = Arc::new(std::mem::take(&mut self.bundle_state));
+        self.snapshot_historical(
+            latest_header.number,
+            latest_flashblock_index,
+            Arc::clone(&bundle_state),
+        );
 
         let now_ms =
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
@@ -302,7 +330,8 @@ impl PendingBlocksBuilder {
             state_root_times: self.state_root_times,
             state_overrides: self.state_overrides,
             historical_state_overrides: self.historical_state_overrides,
-            bundle_state: self.bundle_state,
+            historical_bundle_states: self.historical_bundle_states,
+            bundle_state,
         })
     }
 }
@@ -331,8 +360,9 @@ pub struct PendingBlocks {
     state_root_times: HashMap<B256, u128>,
     state_overrides: Option<StateOverride>,
     historical_state_overrides: StdHashMap<(u64, u64), StateOverride>,
+    historical_bundle_states: StdHashMap<(u64, u64), Arc<BundleState>>,
 
-    bundle_state: BundleState,
+    bundle_state: Arc<BundleState>,
 }
 
 impl PendingBlocks {
@@ -425,9 +455,31 @@ impl PendingBlocks {
     /// Unlike [`Self::get_bundle_state`], this borrows the bundle without cloning, which is what
     /// the lazy [`PendingBundleOverlay`](crate::PendingBundleOverlay) needs to serve reads from
     /// the in-memory diff.
+    ///
+    /// The returned [`Arc`] is a cheap handle to the latest cumulative bundle; the
+    /// [`PendingBundleOverlay`](crate::PendingBundleOverlay) holds it for the lifetime of a call
+    /// without cloning the underlying diff.
     #[inline]
-    pub const fn bundle_state_ref(&self) -> &BundleState {
-        &self.bundle_state
+    pub fn latest_bundle_state(&self) -> Arc<BundleState> {
+        Arc::clone(&self.bundle_state)
+    }
+
+    /// Returns the bundle-state snapshot captured at `(block_number, block_index)`, if retained.
+    ///
+    /// Snapshots are kept for the most recent [`MAX_HISTORICAL_OVERRIDES`] flashblock indices.
+    #[inline]
+    pub fn get_historical_bundle_state_at(
+        &self,
+        block_number: u64,
+        block_index: u64,
+    ) -> Option<Arc<BundleState>> {
+        self.historical_bundle_states.get(&(block_number, block_index)).cloned()
+    }
+
+    /// Returns a reference to the retained historical bundle-state snapshots.
+    #[inline]
+    pub const fn get_historical_bundle_states(&self) -> &StdHashMap<(u64, u64), Arc<BundleState>> {
+        &self.historical_bundle_states
     }
 
     /// Returns a clone of the bundle state.
@@ -439,7 +491,7 @@ impl PendingBlocks {
     pub fn get_bundle_state(&self) -> BundleState {
         let size = self.bundle_state.state.len();
         let start = Instant::now();
-        let cloned = self.bundle_state.clone();
+        let cloned = (*self.bundle_state).clone();
         Metrics::bundle_state_clone_duration().record(start.elapsed());
         Metrics::bundle_state_clone_size().record(size as f64);
         cloned

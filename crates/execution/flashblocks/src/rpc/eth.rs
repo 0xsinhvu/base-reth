@@ -153,15 +153,20 @@ pub trait EthApiOverride {
         block_number: Option<BlockId>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Base>>>>;
 
-    /// Simulates transactions on top of the latest pending flashblock state.
+    /// Simulates transactions on top of a pending flashblock bundle.
     ///
     /// Behaves like `eth_simulateV1`, but executes against the in-memory flashblock bundle via
     /// [`PendingBundleOverlay`](crate::PendingBundleOverlay) instead of the chain tip, so the
     /// pending block's effects are visible without converting the diff into state overrides.
+    ///
+    /// When `block_number` and `block_index` are both supplied, the bundle captured at that
+    /// flashblock snapshot is used; otherwise the latest pending bundle is used.
     #[method(name = "fbSimulateV1")]
     async fn fb_simulate_v1(
         &self,
         opts: SimulatePayload<BaseTransactionRequest>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Base>>>>;
 
     /// Returns logs matching the filter, including pending flashblock logs.
@@ -512,8 +517,14 @@ where
     async fn fb_simulate_v1(
         &self,
         opts: SimulatePayload<BaseTransactionRequest>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Eth::NetworkTypes>>>> {
-        debug!(message = "rpc::fb_simulate_v1");
+        debug!(
+            message = "rpc::fb_simulate_v1",
+            block_number = ?block_number,
+            block_index = ?block_index,
+        );
         Metrics::rpc_fb_simulate_v1().increment(1);
 
         // Without pending flashblock state there is nothing to overlay, so behave exactly like
@@ -522,7 +533,7 @@ where
             return EthCall::simulate_v1(&self.eth_api, opts, None).await.map_err(Into::into);
         };
 
-        OverlayCall::simulate_v1(&self.eth_api, pending, opts).await
+        OverlayCall::simulate_v1(&self.eth_api, pending, opts, block_number, block_index).await
     }
 
     async fn get_logs(&self, filter: Filter) -> RpcResult<Vec<Log>> {
