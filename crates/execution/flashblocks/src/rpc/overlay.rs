@@ -140,9 +140,9 @@ impl OverlayCall {
         eth_api: &Eth,
         pending: Arc<PendingBlocks>,
         request: BaseTransactionRequest,
-        overrides: EvmOverrides,
         block_number: Option<u64>,
         block_index: Option<u64>,
+        overrides: EvmOverrides,
     ) -> RpcResult<Bytes>
     where
         Eth: FullEthApi<NetworkTypes = Base> + Clone + Send + Sync + 'static,
@@ -198,9 +198,9 @@ impl OverlayCall {
         eth_api: &Eth,
         pending: Arc<PendingBlocks>,
         request: BaseTransactionRequest,
-        state_override: Option<StateOverride>,
         block_number: Option<u64>,
         block_index: Option<u64>,
+        state_override: Option<StateOverride>,
     ) -> RpcResult<U256>
     where
         Eth: FullEthApi<NetworkTypes = Base> + Clone + Send + Sync + 'static,

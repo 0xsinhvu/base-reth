@@ -148,10 +148,10 @@ pub trait EthApiOverride {
     async fn fb_call(
         &self,
         transaction: BaseTransactionRequest,
-        state_overrides: Option<StateOverride>,
-        block_overrides: Option<Box<BlockOverrides>>,
         block_number: Option<u64>,
         block_index: Option<u64>,
+        state_overrides: Option<StateOverride>,
+        block_overrides: Option<Box<BlockOverrides>>,
     ) -> RpcResult<alloy_primitives::Bytes>;
 
     /// Estimates gas with flashblock state support.
@@ -175,9 +175,9 @@ pub trait EthApiOverride {
     async fn fb_estimate_gas(
         &self,
         transaction: BaseTransactionRequest,
-        overrides: Option<StateOverride>,
         block_number: Option<u64>,
         block_index: Option<u64>,
+        overrides: Option<StateOverride>,
     ) -> RpcResult<U256>;
 
     /// Simulates transactions with flashblock state support.
@@ -480,10 +480,10 @@ where
     async fn fb_call(
         &self,
         transaction: BaseTransactionRequest,
-        state_overrides: Option<StateOverride>,
-        block_overrides: Option<Box<BlockOverrides>>,
         block_number: Option<u64>,
         block_index: Option<u64>,
+        state_overrides: Option<StateOverride>,
+        block_overrides: Option<Box<BlockOverrides>>,
     ) -> RpcResult<alloy_primitives::Bytes> {
         debug!(
             message = "rpc::fb_call",
@@ -503,7 +503,7 @@ where
                 .map_err(Into::into);
         };
 
-        OverlayCall::call(&self.eth_api, pending, transaction, overrides, block_number, block_index)
+        OverlayCall::call(&self.eth_api, pending, transaction, block_number, block_index, overrides)
             .await
     }
 
@@ -543,9 +543,9 @@ where
     async fn fb_estimate_gas(
         &self,
         transaction: BaseTransactionRequest,
-        overrides: Option<StateOverride>,
         block_number: Option<u64>,
         block_index: Option<u64>,
+        overrides: Option<StateOverride>,
     ) -> RpcResult<U256> {
         debug!(
             message = "rpc::fb_estimate_gas",
@@ -572,9 +572,9 @@ where
             &self.eth_api,
             pending,
             transaction,
-            overrides,
             block_number,
             block_index,
+            overrides,
         )
         .await
     }
