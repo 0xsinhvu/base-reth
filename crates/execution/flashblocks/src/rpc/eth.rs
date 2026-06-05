@@ -163,6 +163,23 @@ pub trait EthApiOverride {
         overrides: Option<StateOverride>,
     ) -> RpcResult<U256>;
 
+    /// Estimates gas on top of a pending flashblock bundle.
+    ///
+    /// Behaves like `eth_estimateGas`, but executes against the in-memory flashblock bundle via
+    /// [`PendingBundleOverlay`](crate::PendingBundleOverlay) instead of the chain tip, so the
+    /// pending block's effects are visible without converting the diff into state overrides.
+    ///
+    /// When `block_number` and `block_index` are both supplied, the bundle captured at that
+    /// flashblock snapshot is used; otherwise the latest pending bundle is used.
+    #[method(name = "fbEstimateGas")]
+    async fn fb_estimate_gas(
+        &self,
+        transaction: BaseTransactionRequest,
+        overrides: Option<StateOverride>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
+    ) -> RpcResult<U256>;
+
     /// Simulates transactions with flashblock state support.
     #[method(name = "simulateV1")]
     async fn simulate_v1(
@@ -521,6 +538,45 @@ where
         EthCall::estimate_gas_at(&self.eth_api, transaction, block_id, Some(final_overrides))
             .await
             .map_err(Into::into)
+    }
+
+    async fn fb_estimate_gas(
+        &self,
+        transaction: BaseTransactionRequest,
+        overrides: Option<StateOverride>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
+    ) -> RpcResult<U256> {
+        debug!(
+            message = "rpc::fb_estimate_gas",
+            transaction = ?transaction,
+            block_number = ?block_number,
+            block_index = ?block_index,
+        );
+        Metrics::rpc_fb_estimate_gas().increment(1);
+
+        // Without pending flashblock state there is nothing to overlay, so behave exactly like
+        // `eth_estimateGas` at the chain tip.
+        let Some(pending) = self.flashblocks_state.get_pending_blocks().as_ref().cloned() else {
+            return EthCall::estimate_gas_at(
+                &self.eth_api,
+                transaction,
+                BlockNumberOrTag::Latest.into(),
+                overrides,
+            )
+            .await
+            .map_err(Into::into);
+        };
+
+        OverlayCall::estimate_gas(
+            &self.eth_api,
+            pending,
+            transaction,
+            overrides,
+            block_number,
+            block_index,
+        )
+        .await
     }
 
     async fn simulate_v1(

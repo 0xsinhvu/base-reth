@@ -1,6 +1,6 @@
 //! Lazy pending-state overlay for flashblocks RPC.
 //!
-//! Pending `eth_fbSimulateV1` need to execute against the canonical state with the
+//! Pending `eth_fbCall`/`eth_fbEstimateGas`/`eth_fbSimulateV1` need to execute against the canonical state with the
 //! flashblock diff applied on top. The historical approach converted the diff into a
 //! [`StateOverride`](alloy_rpc_types_eth::state::StateOverride) and called
 //! `apply_state_overrides`, which eagerly materializes *every* changed account and slot into the
@@ -22,7 +22,7 @@ use alloy_network::TransactionBuilder;
 use alloy_primitives::{Address, B256, BlockNumber, Bytes, StorageKey, StorageValue, U256};
 use alloy_rpc_types::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
-    state::EvmOverrides,
+    state::{EvmOverrides, StateOverride},
 };
 use base_common_network::Base;
 use base_common_rpc_types::BaseTransactionRequest;
@@ -178,6 +178,58 @@ impl OverlayCall {
                 let res = this.transact(&mut db, evm_env, tx_env)?;
 
                 Eth::Error::ensure_success(res.result)
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    /// `eth_fbEstimateGas`: estimates gas for `request` on top of a pending flashblock bundle.
+    ///
+    /// This is the `eth_estimateGas` counterpart: like [`Self::call`], it layers the pending
+    /// [`BundleState`](revm::database::BundleState) lazily over the canonical state via
+    /// [`PendingBundleOverlay`] rather than materializing the diff as state overrides, then runs
+    /// the same gas-search as reth's `eth_estimateGas`.
+    ///
+    /// When both `block_number` and `block_index` are supplied, the bundle captured at that
+    /// flashblock snapshot is used (returning [`EthApiError::HeaderNotFound`] if it is no longer
+    /// retained); otherwise the latest bundle is used. The base block is always the
+    /// [`canonical_block_number`](PendingBlocks::canonical_block_number) the bundle was built on.
+    pub async fn estimate_gas<Eth>(
+        eth_api: &Eth,
+        pending: Arc<PendingBlocks>,
+        request: BaseTransactionRequest,
+        state_override: Option<StateOverride>,
+        block_number: Option<u64>,
+        block_index: Option<u64>,
+    ) -> RpcResult<U256>
+    where
+        Eth: FullEthApi<NetworkTypes = Base> + Clone + Send + Sync + 'static,
+        jsonrpsee_types::error::ErrorObject<'static>: From<Eth::Error>,
+    {
+        // Pick the bundle to overlay: a specific flashblock snapshot when both coordinates are
+        // given, otherwise the latest.
+        let bundle = match (block_number, block_index) {
+            (Some(number), Some(index)) => {
+                pending.get_historical_bundle_state_at(number, index).ok_or_else(|| {
+                    let err: ErrorObjectOwned =
+                        EthApiError::HeaderNotFound(BlockId::number(number)).into();
+                    err
+                })?
+            }
+            _ => pending.latest_bundle_state(),
+        };
+
+        // Estimate on top of the canonical block the flashblock bundle was built on; the bundle
+        // diff is layered over that canonical state by `PendingBundleOverlay`, which is itself the
+        // `EvmStateProvider` reth's gas search reads from.
+        let block_id: BlockId = pending.canonical_block_number().into();
+        let (evm_env, at) = eth_api.evm_env_at(block_id).await.map_err(Into::into)?;
+
+        eth_api
+            .spawn_blocking_io_fut(move |this| async move {
+                let state = this.state_at_block_id(at).await?;
+                let overlay = PendingBundleOverlay::new(state, bundle);
+                this.estimate_gas_with(evm_env, request, overlay, state_override)
             })
             .await
             .map_err(Into::into)
