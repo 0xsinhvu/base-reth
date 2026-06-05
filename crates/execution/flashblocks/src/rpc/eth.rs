@@ -56,8 +56,8 @@ use alloy_primitives::{
 };
 use alloy_rpc_types::{
     BlockOverrides,
-    simulate::{SimBlock, SimulatePayload, SimulatedBlock},
-    state::{AccountOverride, EvmOverrides, StateOverride, StateOverridesBuilder},
+    simulate::{SimulatePayload, SimulatedBlock},
+    state::{AccountOverride, EvmOverrides, StateOverride},
 };
 use alloy_rpc_types_eth::{Filter, Log};
 use base_common_network::Base;
@@ -449,32 +449,29 @@ where
             block_overrides = ?block_overrides,
         );
 
-        let mut block_id = block_number.unwrap_or_default();
-        let mut pending_overrides = EvmOverrides::default();
-        // If the call is to pending block use cached override (if it exists)
+        let block_id = block_number.unwrap_or_default();
+        let overrides = EvmOverrides::new(state_overrides, block_overrides);
+
+        // For a pending call, overlay the latest flashblock bundle lazily over the canonical state
+        // via `OverlayCall` instead of materializing the diff as state overrides.
         if block_id.is_pending() {
             Metrics::rpc_call().increment(1);
-            let pending_blocks = self.flashblocks_state.get_pending_blocks();
-            block_id = pending_blocks.get_canonical_block_number().into();
-            pending_overrides.state = pending_blocks.get_state_overrides();
+            if let Some(pending) = self.flashblocks_state.get_pending_blocks().as_ref().cloned() {
+                return OverlayCall::call(
+                    &self.eth_api,
+                    pending,
+                    transaction,
+                    None,
+                    None,
+                    overrides,
+                )
+                .await;
+            }
         }
 
-        // Apply user's overrides on top
-        let mut state_overrides_builder =
-            StateOverridesBuilder::new(pending_overrides.state.unwrap_or_default());
-        state_overrides_builder =
-            state_overrides_builder.extend(state_overrides.unwrap_or_default());
-        let final_overrides = state_overrides_builder.build();
-
-        // Delegate to the underlying eth_api
-        EthCall::call(
-            &self.eth_api,
-            transaction,
-            Some(block_id),
-            EvmOverrides::new(Some(final_overrides), block_overrides),
-        )
-        .await
-        .map_err(Into::into)
+        EthCall::call(&self.eth_api, transaction, Some(block_id), overrides)
+            .await
+            .map_err(Into::into)
     }
 
     async fn fb_call(
@@ -520,22 +517,26 @@ where
             overrides = ?overrides,
         );
 
-        let mut block_id = block_number.unwrap_or_default();
-        let mut pending_overrides = EvmOverrides::default();
-        // If the call is to pending block use cached override (if it exists)
+        let block_id = block_number.unwrap_or_default();
+
+        // For a pending estimate, overlay the latest flashblock bundle lazily over the canonical
+        // state via `OverlayCall` instead of materializing the diff as state overrides.
         if block_id.is_pending() {
             Metrics::rpc_estimate_gas().increment(1);
-            let pending_blocks = self.flashblocks_state.get_pending_blocks();
-            block_id = pending_blocks.get_canonical_block_number().into();
-            pending_overrides.state = pending_blocks.get_state_overrides();
+            if let Some(pending) = self.flashblocks_state.get_pending_blocks().as_ref().cloned() {
+                return OverlayCall::estimate_gas(
+                    &self.eth_api,
+                    pending,
+                    transaction,
+                    None,
+                    None,
+                    overrides,
+                )
+                .await;
+            }
         }
 
-        let mut state_overrides_builder =
-            StateOverridesBuilder::new(pending_overrides.state.unwrap_or_default());
-        state_overrides_builder = state_overrides_builder.extend(overrides.unwrap_or_default());
-        let final_overrides = state_overrides_builder.build();
-
-        EthCall::estimate_gas_at(&self.eth_api, transaction, block_id, Some(final_overrides))
+        EthCall::estimate_gas_at(&self.eth_api, transaction, block_id, overrides)
             .await
             .map_err(Into::into)
     }
@@ -589,33 +590,18 @@ where
             block_number = ?block_number,
         );
 
-        let mut block_id = block_number.unwrap_or_default();
-        let mut pending_overrides = EvmOverrides::default();
+        let block_id = block_number.unwrap_or_default();
 
-        // If the call is to pending block use cached override (if it exists)
+        // For a pending simulation, overlay the latest flashblock bundle lazily over the canonical
+        // state via `OverlayCall` instead of materializing the diff as state overrides.
         if block_id.is_pending() {
             Metrics::rpc_simulate_v1().increment(1);
-            let pending_blocks = self.flashblocks_state.get_pending_blocks();
-            block_id = pending_blocks.get_canonical_block_number().into();
-            pending_overrides.state = pending_blocks.get_state_overrides();
+            if let Some(pending) = self.flashblocks_state.get_pending_blocks().as_ref().cloned() {
+                return OverlayCall::simulate_v1(&self.eth_api, pending, opts, None, None).await;
+            }
         }
 
-        // Prepend flashblocks pending overrides to the block state calls
-        let mut block_state_calls: Vec<SimBlock<BaseTransactionRequest>> = Vec::new();
-        for sim_block in opts.block_state_calls {
-            let mut state_overrides_builder =
-                StateOverridesBuilder::new(pending_overrides.state.clone().unwrap_or_default());
-            state_overrides_builder =
-                state_overrides_builder.extend(sim_block.state_overrides.unwrap_or_default());
-            let final_overrides = state_overrides_builder.build();
-
-            let block_state_call = SimBlock { state_overrides: Some(final_overrides), ..sim_block };
-            block_state_calls.push(block_state_call);
-        }
-
-        let payload = SimulatePayload { block_state_calls, ..opts };
-
-        EthCall::simulate_v1(&self.eth_api, payload, Some(block_id)).await.map_err(Into::into)
+        EthCall::simulate_v1(&self.eth_api, opts, Some(block_id)).await.map_err(Into::into)
     }
 
     async fn fb_simulate_v1(
