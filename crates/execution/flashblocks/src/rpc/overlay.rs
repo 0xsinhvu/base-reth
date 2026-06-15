@@ -18,7 +18,6 @@ use std::sync::Arc;
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockId;
 use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides};
-use alloy_network::TransactionBuilder;
 use alloy_primitives::{Address, B256, BlockNumber, Bytes, StorageKey, StorageValue, U256};
 use alloy_rpc_types::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
@@ -229,7 +228,12 @@ impl OverlayCall {
             .spawn_blocking_io_fut(move |this| async move {
                 let state = this.state_at_block_id(at).await?;
                 let overlay = PendingBundleOverlay::new(state, bundle);
-                this.estimate_gas_with(evm_env, request, overlay, state_override)
+                this.estimate_gas_with(
+                    evm_env,
+                    request,
+                    overlay,
+                    EvmOverrides::new(state_override, None),
+                )
             })
             .await
             .map_err(Into::into)
@@ -297,6 +301,11 @@ impl OverlayCall {
                 let mut db =
                     State::builder().with_database(StateProviderDatabase::new(overlay)).build();
 
+                // `execute_transactions` only consults this provider when the node is configured to
+                // compute state roots for `eth_simulateV1` (off by default). The bundle diff is
+                // already layered into `db` above, so the canonical provider is sufficient here.
+                let state_provider = this.state_at_block_id(block_id).await?;
+
                 let SimulatePayload {
                     block_state_calls,
                     trace_transfers,
@@ -311,6 +320,11 @@ impl OverlayCall {
                 // Track previous block number and timestamp for validation.
                 let mut prev_block_number = parent.number();
                 let mut prev_timestamp = parent.timestamp();
+
+                // Request-wide remaining gas budget; `execute_transactions` caps each call against
+                // it and decrements as gas is consumed.
+                let call_gas_limit = this.call_gas_limit();
+                let mut remaining_call_gas_limit = (call_gas_limit > 0).then_some(call_gas_limit);
 
                 for block in block_state_calls {
                     // Validate block number ordering if overridden.
@@ -384,35 +398,7 @@ impl OverlayCall {
                             .map_err(Eth::Error::from_eth_err)?;
                     }
 
-                    let block_gas_limit = evm_env.block_env.gas_limit();
                     let chain_id = evm_env.cfg_env.chain_id;
-
-                    let default_gas_limit = {
-                        let total_specified_gas =
-                            calls.iter().filter_map(|tx| tx.as_ref().gas_limit()).sum::<u64>();
-                        let txs_without_gas_limit =
-                            calls.iter().filter(|tx| tx.as_ref().gas_limit().is_none()).count();
-
-                        if total_specified_gas > block_gas_limit {
-                            return Err(Eth::Error::from_eth_err(EthApiError::Other(Box::new(
-                                EthSimulateError::BlockGasLimitExceeded,
-                            ))));
-                        }
-
-                        if txs_without_gas_limit > 0 {
-                            // Divide remaining gas equally among transactions without gas.
-                            let gas_per_tx = (block_gas_limit - total_specified_gas)
-                                / txs_without_gas_limit as u64;
-                            let call_gas_limit = this.call_gas_limit();
-                            if call_gas_limit > 0 {
-                                gas_per_tx.min(call_gas_limit)
-                            } else {
-                                gas_per_tx
-                            }
-                        } else {
-                            0
-                        }
-                    };
 
                     let ctx = this
                         .evm_config()
@@ -444,9 +430,11 @@ impl OverlayCall {
 
                         simulate::execute_transactions(
                             builder,
+                            &state_provider,
                             calls,
-                            default_gas_limit,
+                            &mut remaining_call_gas_limit,
                             chain_id,
+                            this.compute_state_root_for_eth_simulate(),
                             this.converter(),
                         )
                         .map_err(map_err)?
@@ -464,9 +452,11 @@ impl OverlayCall {
 
                         simulate::execute_transactions(
                             builder,
+                            &state_provider,
                             calls,
-                            default_gas_limit,
+                            &mut remaining_call_gas_limit,
                             chain_id,
+                            this.compute_state_root_for_eth_simulate(),
                             this.converter(),
                         )
                         .map_err(map_err)?

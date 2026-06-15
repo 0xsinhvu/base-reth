@@ -214,7 +214,10 @@ where
                     )
                 })?;
 
-            Some(PendingState { bundle_state, trie_input: Some(trie_input) })
+            Some(PendingState {
+                bundle_state: Arc::new(bundle_state),
+                trie_input: Some(trie_input),
+            })
         } else {
             None
         };

@@ -536,9 +536,14 @@ where
             }
         }
 
-        EthCall::estimate_gas_at(&self.eth_api, transaction, block_id, overrides)
-            .await
-            .map_err(Into::into)
+        EthCall::estimate_gas_at(
+            &self.eth_api,
+            transaction,
+            block_id,
+            EvmOverrides::new(overrides, None),
+        )
+        .await
+        .map_err(Into::into)
     }
 
     async fn fb_estimate_gas(
@@ -563,7 +568,7 @@ where
                 &self.eth_api,
                 transaction,
                 BlockNumberOrTag::Latest.into(),
-                overrides,
+                EvmOverrides::new(overrides, None),
             )
             .await
             .map_err(Into::into);

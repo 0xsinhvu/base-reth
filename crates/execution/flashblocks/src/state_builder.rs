@@ -109,6 +109,22 @@ where
         self.evm.db_mut()
     }
 
+    /// Seeds block-level offsets when appending transactions to an already-executed pending block.
+    pub const fn set_execution_offsets(&mut self, cumulative_gas_used: u64, next_log_index: usize) {
+        self.cumulative_gas_used = cumulative_gas_used;
+        self.next_log_index = next_log_index;
+    }
+
+    /// Returns the cumulative gas used for the current pending block.
+    pub const fn cumulative_gas_used(&self) -> u64 {
+        self.cumulative_gas_used
+    }
+
+    /// Returns the next log index for the current pending block.
+    pub const fn next_log_index(&self) -> usize {
+        self.next_log_index
+    }
+
     /// Executes a single transaction and updates internal state.
     /// Should be called in order for each transaction.
     #[instrument(level = "debug", skip_all, fields(tx_hash = %transaction.tx_hash(), idx = idx))]
@@ -655,8 +671,9 @@ mod tests {
         pending_blocks_builder.with_transaction_result(tx_hash, first_result.result);
         pending_blocks_builder.with_execution_time(tx_hash, 1_234);
 
-        let prev_pending_blocks =
-            Arc::new(pending_blocks_builder.build(None).expect("should build cached pending blocks"));
+        let prev_pending_blocks = Arc::new(
+            pending_blocks_builder.build(None).expect("should build cached pending blocks"),
+        );
 
         let second_evm_env = evm_config.evm_env(&header).expect("failed to create evm env");
         let second_evm = evm_config.evm_with_env(InMemoryDB::default(), second_evm_env);
