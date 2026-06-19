@@ -664,7 +664,7 @@ mod tests {
                 withdrawals_root: B256::ZERO,
                 blob_gas_used: None,
             },
-            metadata: Metadata { block_number: header.number },
+            metadata: Metadata::new(header.number),
         }]);
         pending_blocks_builder.with_receipt(tx_hash, first_result.receipt.clone());
         pending_blocks_builder.with_transaction_state(tx_hash, first_result.state.clone());
@@ -955,7 +955,7 @@ mod tests {
                 withdrawals_root: B256::ZERO,
                 blob_gas_used: None,
             },
-            metadata: Metadata { block_number: header.number },
+            metadata: Metadata::new(header.number),
         }]);
         pending_blocks_builder.with_transaction_sender(tx_a_hash, sender);
         pending_blocks_builder.with_receipt(tx_a_hash, first_result.receipt.clone());
