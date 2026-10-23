@@ -22,6 +22,7 @@ use base_execution_payload_builder::{
     config::{BaseBuilderConfig, BaseDAConfig, GasLimitConfig, ResourceMeteringConfig},
 };
 use base_execution_rpc::{
+    BaseEthSimulateApiServer, BaseEthSimulateHandler,
     config::{BaseEthConfigApiServer, BaseEthConfigHandler},
     eth::BaseEthApiBuilder,
     miner::{BaseMinerExtApi, MinerApiExtServer},
@@ -585,6 +586,7 @@ where
             Pool: TransactionPool<Transaction: BasePooledTx>,
         >,
     EthB: EthApiBuilder<N>,
+    BaseEthSimulateHandler<EthB::EthApi>: BaseEthSimulateApiServer,
     PVB: Send,
     EB: EngineApiBuilder<N>,
     EVB: EngineValidatorBuilder<N>,
@@ -625,6 +627,9 @@ where
 
                 modules.merge_if_module_configured(RethRpcModule::Eth, eth_config.into_rpc())?;
 
+                let eth_simulate = BaseEthSimulateHandler::new(registry.eth_api().clone());
+                modules.merge_if_module_configured(RethRpcModule::Eth, eth_simulate.into_rpc())?;
+
                 debug!(target: "reth::cli", "Installing debug payload witness rpc endpoint");
                 modules.merge_if_module_configured(RethRpcModule::Debug, debug_ext.into_rpc())?;
 
@@ -663,6 +668,7 @@ where
         >,
     <<N as FullNodeComponents>::Pool as TransactionPool>::Transaction: BasePooledTx,
     EthB: EthApiBuilder<N>,
+    BaseEthSimulateHandler<EthB::EthApi>: BaseEthSimulateApiServer,
     PVB: PayloadValidatorBuilder<N>,
     EB: EngineApiBuilder<N>,
     EVB: EngineValidatorBuilder<N>,

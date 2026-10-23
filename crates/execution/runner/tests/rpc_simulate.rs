@@ -1,7 +1,8 @@
-//! Wire checks for timestamp-dependent simulation environments.
+//! Wire checks for simulation block environments.
 
 use std::sync::Arc;
 
+use alloy_primitives::{B256, Bytes, U256, hex};
 use base_execution_chainspec::BaseChainSpec;
 use base_node_runner::test_utils::TestHarness;
 use base_test_utils::{Account, build_test_genesis};
@@ -94,6 +95,77 @@ async fn simulation_preserves_same_second_denim_timestamps_and_overrides() -> ey
         assert_eq!(
             blocks[index]["calls"][0]["returnData"],
             json!(format!("0x{timestamp:064x}{base_fee:064x}"))
+        );
+    }
+    Ok(())
+}
+
+/// Returns `words` concatenated, as call return data.
+fn return_data(words: [B256; 3]) -> Value {
+    json!(Bytes::from(words.concat()))
+}
+
+#[tokio::test]
+async fn simulate_v2_executes_under_the_chains_block_env() -> eyre::Result<()> {
+    let prev_randao = B256::repeat_byte(0xab);
+    let mut genesis = build_test_genesis();
+    genesis.mix_hash = prev_randao;
+    // Jovian EIP-1559 params (denominator 50, elasticity 6, no min base fee), without which the
+    // next block's base fee cannot be derived and reads as zero.
+    genesis.extra_data = Bytes::from_static(&hex!("0100000032000000060000000000000000"));
+    let harness = TestHarness::builder()
+        .with_chain_spec(Arc::new(BaseChainSpec::from_genesis(genesis)))
+        .build()
+        .await?;
+    let client = harness.rpc_client()?;
+    let genesis_hash = harness.latest_block().hash();
+    let probe = Account::Bob.address();
+    // Return PREVRANDAO, BASEFEE and BLOCKHASH(NUMBER - 1). No gas price, so the call only
+    // executes under a nonzero BASEFEE because validation is off.
+    let code = "0x4460005248602052600143034060405260606000f3";
+    let call = json!({ "from": Account::Alice.address(), "to": probe, "gas": "0x186a0" });
+    let params = |second_block_overrides: Value| {
+        json!([{
+            "blockStateCalls": [
+                { "stateOverrides": { (probe.to_string()): { "code": code } }, "calls": [call] },
+                { "blockOverrides": second_block_overrides, "calls": [call] }
+            ]
+        }, "latest"])
+    };
+
+    // V1 keeps the spec's placeholders and serves block 1's simulated hash.
+    let v1: Value = client.request("eth_simulateV1", params(Value::Null)).await?;
+    let v1 = v1.as_array().unwrap();
+    let simulated_hash: B256 = serde_json::from_value(v1[0]["hash"].clone())?;
+    for (block, parent_hash) in v1.iter().zip([genesis_hash, simulated_hash]) {
+        assert_eq!(block["calls"][0]["status"], "0x1");
+        assert_eq!(
+            block["calls"][0]["returnData"],
+            return_data([B256::ZERO, B256::ZERO, parent_hash])
+        );
+    }
+
+    // V2 refuses block 1's hash, which no block on chain will have...
+    let err = client
+        .request::<_, Value>("eth_simulateV2", params(Value::Null))
+        .await
+        .expect_err("BLOCKHASH of a simulated block must fail");
+    assert!(err.to_string().contains("BLOCKHASH(1)"), "{err}");
+
+    // ...but serves one the caller pins, and the base block's prevRandao and the derived basefee.
+    let pin = B256::repeat_byte(0xcd);
+    let v2: Value =
+        client.request("eth_simulateV2", params(json!({ "blockHash": { "1": pin } }))).await?;
+    let v2 = v2.as_array().unwrap();
+    assert_eq!(v2.len(), 2);
+    for (block, parent_hash) in v2.iter().zip([genesis_hash, pin]) {
+        let base_fee: U256 = serde_json::from_value(block["baseFeePerGas"].clone())?;
+        assert_ne!(base_fee, U256::ZERO);
+        assert_eq!(block["mixHash"], json!(prev_randao));
+        assert_eq!(block["calls"][0]["status"], "0x1");
+        assert_eq!(
+            block["calls"][0]["returnData"],
+            return_data([prev_randao, base_fee.into(), parent_hash])
         );
     }
     Ok(())

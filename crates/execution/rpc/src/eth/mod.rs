@@ -2,6 +2,7 @@
 
 pub mod proofs;
 pub mod receipt;
+pub mod simulate;
 pub mod transaction;
 
 mod base_time;

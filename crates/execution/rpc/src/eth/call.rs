@@ -38,7 +38,13 @@ use revm::{
 };
 use revm_inspectors::transfer::TransferInspector;
 
-use crate::{BaseEthApi, BaseEthApiError, eth::RpcNodeCore};
+use crate::{
+    BaseEthApi, BaseEthApiError,
+    eth::{
+        RpcNodeCore,
+        simulate::{SealedBlockHashes, SimulateVersion},
+    },
+};
 
 impl<N, Rpc> EthCall for BaseEthApi<N, Rpc>
 where
@@ -53,6 +59,36 @@ where
         payload: SimulatePayload<RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>>,
         block: Option<BlockId>,
     ) -> Result<Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>>, Self::Error> {
+        self.simulate(payload, block, SimulateVersion::V1).await
+    }
+}
+
+impl<N, Rpc> BaseEthApi<N, Rpc>
+where
+    N: RpcNodeCore,
+    N::Evm: ConfigureEvm<NextBlockEnvCtx = BaseNextBlockEnvAttributes>,
+    N::Provider: ChainSpecProvider<ChainSpec = BaseChainSpec>,
+    BaseEthApiError: FromEvmError<N::Evm>,
+    Rpc: RpcConvert<Primitives = N::Primitives, Error = BaseEthApiError, Evm = N::Evm>,
+{
+    /// `eth_simulateV2`: `eth_simulateV1` under the block env the chain will execute. See
+    /// [`simulate`](crate::eth::simulate) for how the two differ.
+    pub async fn simulate_v2(
+        &self,
+        payload: SimulatePayload<RpcTxReq<Rpc::Network>>,
+        block: Option<BlockId>,
+    ) -> Result<Vec<SimulatedBlock<RpcBlock<Rpc::Network>>>, BaseEthApiError> {
+        self.simulate(payload, block, SimulateVersion::V2).await
+    }
+
+    /// Shared body of `eth_simulateV1` and `eth_simulateV2`, which differ only in how `version`
+    /// seeds each simulated block's env and resolves `BLOCKHASH` of simulated blocks.
+    async fn simulate(
+        &self,
+        payload: SimulatePayload<RpcTxReq<Rpc::Network>>,
+        block: Option<BlockId>,
+        version: SimulateVersion,
+    ) -> Result<Vec<SimulatedBlock<RpcBlock<Rpc::Network>>>, BaseEthApiError> {
         if payload.block_state_calls.len() > self.max_simulate_blocks() as usize {
             return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into());
         }
@@ -81,10 +117,24 @@ where
 
         self.spawn_with_state_at_block(block, move |this, db| {
             let state_provider = db.database.0.0;
+            // V2 refuses BLOCKHASH from the first simulated block up: those blocks have no hash on
+            // chain, and V2 never pins their simulated hashes (see below).
+            let first_simulated =
+                (version == SimulateVersion::V2).then(|| parent.number().saturating_add(1));
             let mut db = State::builder()
-                .with_database(StateProviderDatabase::new(&state_provider))
+                .with_database(SealedBlockHashes::new(
+                    StateProviderDatabase::new(&state_provider),
+                    first_simulated,
+                ))
                 .with_bundle_update()
                 .build();
+            // V1 zeroes prevrandao, matching spec behavior where MixDigest is zero-initialized.
+            // V2 carries the base block's into every simulated block: Base inherits it from the L1
+            // origin, so the next block repeats it unless the origin advances.
+            let prev_randao = match version {
+                SimulateVersion::V1 => B256::ZERO,
+                SimulateVersion::V2 => parent.mix_hash().unwrap_or_default(),
+            };
             let mut parent = parent;
 
             let chain_spec = this.provider().chain_spec();
@@ -104,7 +154,7 @@ where
                 max_simulate_blocks,
             )?;
 
-            let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
+            let mut blocks: Vec<SimulatedBlock<RpcBlock<Rpc::Network>>> =
                 Vec::with_capacity(block_state_calls.len());
 
             let call_gas_limit = this.call_gas_limit();
@@ -116,13 +166,13 @@ where
                 let attributes = this
                     .pending_env_builder()
                     .pending_env_attributes(&parent, block_overrides.as_ref())
-                    .map_err(Self::Error::from_eth_err)?;
+                    .map_err(BaseEthApiError::from_eth_err)?;
 
                 let mut evm_env = this
                     .evm_config()
                     .next_evm_env(&parent, &attributes)
                     .map_err(RethError::other)
-                    .map_err(Self::Error::from_eth_err)?;
+                    .map_err(BaseEthApiError::from_eth_err)?;
 
                 // Always disable EIP-3607
                 evm_env.cfg_env.disable_eip3607 = true;
@@ -137,13 +187,16 @@ where
                     // If not explicitly required, we disable nonce check <https://github.com/paradigmxyz/reth/issues/16108>
                     evm_env.cfg_env.disable_nonce_check = true;
                     evm_env.cfg_env.disable_base_fee = true;
-                    evm_env.block_env.inner_mut().basefee = 0;
+                    // `disable_base_fee` alone lets an underpriced call execute. V1 also zeroes
+                    // the block's basefee per spec; V2 keeps the derived one so BASEFEE reports
+                    // what the chain will charge.
+                    if version == SimulateVersion::V1 {
+                        evm_env.block_env.inner_mut().basefee = 0;
+                    }
                 }
 
-                // Set prevrandao to zero for simulated blocks by default,
-                // matching spec behavior where MixDigest is zero-initialized.
                 // If user provides an override, it will be applied by apply_block_overrides.
-                evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
+                evm_env.block_env.inner_mut().prevrandao = Some(prev_randao);
                 if !this
                     .provider()
                     .chain_spec()
@@ -164,7 +217,7 @@ where
                 }
                 if let Some(ref state_overrides) = state_overrides {
                     apply_state_overrides(state_overrides.clone(), &mut db)
-                        .map_err(Self::Error::from_eth_err)?;
+                        .map_err(BaseEthApiError::from_eth_err)?;
                 }
 
                 let chain_id = evm_env.cfg_env.chain_id;
@@ -173,11 +226,11 @@ where
                     .evm_config()
                     .context_for_next_block(&parent, attributes)
                     .map_err(RethError::other)
-                    .map_err(Self::Error::from_eth_err)?;
-                let map_err = |e: EthApiError| -> Self::Error {
+                    .map_err(BaseEthApiError::from_eth_err)?;
+                let map_err = |e: EthApiError| -> BaseEthApiError {
                     e.as_simulate_error().map_or_else(
-                        || Self::Error::from_eth_err(e),
-                        |sim_err| Self::Error::from_eth_err(EthApiError::other(sim_err)),
+                        || BaseEthApiError::from_eth_err(e),
+                        |sim_err| BaseEthApiError::from_eth_err(EthApiError::other(sim_err)),
                     )
                 };
 
@@ -194,7 +247,7 @@ where
                             state_overrides,
                             builder.evm_mut().precompiles_mut(),
                         )
-                        .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
+                        .map_err(|e| BaseEthApiError::from_eth_err(EthApiError::other(e)))?;
                     }
 
                     simulate::execute_transactions(
@@ -216,7 +269,7 @@ where
                             state_overrides,
                             builder.evm_mut().precompiles_mut(),
                         )
-                        .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
+                        .map_err(|e| BaseEthApiError::from_eth_err(EthApiError::other(e)))?;
                     }
 
                     simulate::execute_transactions(
@@ -232,10 +285,14 @@ where
                 };
 
                 let simulated_header = result.block.clone_sealed_header();
-                db.override_block_hashes(BTreeMap::from([(
-                    simulated_header.number(),
-                    simulated_header.hash(),
-                )]));
+                // V1 answers later BLOCKHASH reads with the simulated hash, per spec. V2 leaves it
+                // unpinned so `SealedBlockHashes` refuses it.
+                if version == SimulateVersion::V1 {
+                    db.override_block_hashes(BTreeMap::from([(
+                        simulated_header.number(),
+                        simulated_header.hash(),
+                    )]));
+                }
                 parent = simulated_header;
 
                 let block = simulate::build_simulated_block::<BaseEthApiError, Rpc>(
