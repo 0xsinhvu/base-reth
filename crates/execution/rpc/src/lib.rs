@@ -30,7 +30,10 @@ pub use engine::{BaseEngineApi, BaseEngineApiServer, ENGINE_CAPABILITIES};
 pub use error::{BaseEthApiError, BaseInvalidTransactionError, SequencerClientError};
 pub use eth::{
     BaseEthApi, BaseEthApiBuilder, BaseReceiptBuilder, BaseTimeCache,
-    simulate::{BaseEthSimulateApiServer, BaseEthSimulateHandler},
+    simulate::{
+        BaseEthSimulateApiServer, BaseEthSimulateHandler, BaseSimCallResult, BaseSimulatedBlock,
+        GasCheck, GasLeftBounds, GasLeftGuardInspector,
+    },
 };
 pub use metrics::{DebugApiExtMetrics, DebugApis, EthApiExtMetrics, SequencerMetrics};
 #[cfg(feature = "client")]

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use alloy_primitives::{B256, Bytes, U256, hex};
+use alloy_primitives::{B256, Bytes, U64, U256, hex};
 use base_execution_chainspec::BaseChainSpec;
 use base_node_runner::test_utils::TestHarness;
 use base_test_utils::{Account, build_test_genesis};
@@ -167,6 +167,57 @@ async fn simulate_v2_executes_under_the_chains_block_env() -> eyre::Result<()> {
             block["calls"][0]["returnData"],
             return_data([prev_randao, base_fee.into(), parent_hash])
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn simulate_v2_reports_a_gasleft_checks_bound_as_gas_extra() -> eyre::Result<()> {
+    let harness = TestHarness::new().await?;
+    let client = harness.rpc_client()?;
+    let hook = Account::Bob.address();
+    // `if (gasleft() < 500000) revert InsufficientGas();` (`PUSH3 500000 GAS LT PUSH2 JUMPI` to
+    // the revert, else STOP).
+    let code = "0x6207a1205a1061000b57005b6307099c5360e21b5f5260045ffd";
+
+    for trace_transfers in [false, true] {
+        // The one call's result under `method` when it carries `gas`.
+        let simulate = async |method: &'static str, gas: u64| -> eyre::Result<Value> {
+            let call =
+                json!({ "from": Account::Alice.address(), "to": hook, "gas": format!("{gas:#x}") });
+            let blocks: Value = client
+                .request(
+                    method,
+                    json!([{
+                        "traceTransfers": trace_transfers,
+                        "blockStateCalls": [
+                            { "stateOverrides": { (hook.to_string()): { "code": code } }, "calls": [call] }
+                        ]
+                    }, "latest"]),
+                )
+                .await?;
+            Ok(blocks[0]["calls"][0].clone())
+        };
+        let quantity = |value: &Value| -> eyre::Result<u64> {
+            Ok(serde_json::from_value::<U64>(value.clone())?.to())
+        };
+
+        // Both run the check, which 1M gas clears, and report the same gas; V2 also reports the
+        // check's bound as `gasExtra`.
+        let v1 = simulate("eth_simulateV1", 1_000_000).await?;
+        let v2 = simulate("eth_simulateV2", 1_000_000).await?;
+        assert_eq!(v1["status"], "0x1", "{v1}");
+        assert_eq!(v2["status"], "0x1", "{v2}");
+        assert_eq!((&v2["gasUsed"], &v2["maxUsedGas"]), (&v1["gasUsed"], &v1["maxUsedGas"]));
+        assert!(v1.get("gasExtra").is_none(), "{v1}");
+        let (gas_used, gas_extra) = (quantity(&v2["gasUsed"])?, quantity(&v2["gasExtra"])?);
+        assert_eq!(gas_extra, 500_000, "{v2}");
+
+        // V1, which runs the check as the chain does, passes it with `gasUsed + gasExtra`, and with
+        // the `2 * gasUsed + gasExtra` the engine sends.
+        for limit in [gas_used + gas_extra, 2 * gas_used + gas_extra] {
+            assert_eq!(simulate("eth_simulateV1", limit).await?["status"], "0x1", "{limit}");
+        }
     }
     Ok(())
 }

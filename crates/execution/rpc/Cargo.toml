@@ -95,6 +95,7 @@ metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
+serde_json.workspace = true
 alloy-signer.workspace = true
 reth-network-api.workspace = true
 alloy-signer-local.workspace = true

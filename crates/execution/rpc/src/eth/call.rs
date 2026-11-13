@@ -42,7 +42,10 @@ use crate::{
     BaseEthApi, BaseEthApiError,
     eth::{
         RpcNodeCore,
-        simulate::{SealedBlockHashes, SimulateVersion},
+        simulate::{
+            BaseSimulatedBlock, GasLeftBounds, GasLeftGuardInspector, SealedBlockHashes,
+            SimulateVersion,
+        },
     },
 };
 
@@ -59,7 +62,8 @@ where
         payload: SimulatePayload<RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>>,
         block: Option<BlockId>,
     ) -> Result<Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>>, Self::Error> {
-        self.simulate(payload, block, SimulateVersion::V1).await
+        let blocks = self.simulate(payload, block, SimulateVersion::V1).await?;
+        Ok(blocks.into_iter().map(BaseSimulatedBlock::into_v1).collect())
     }
 }
 
@@ -77,18 +81,19 @@ where
         &self,
         payload: SimulatePayload<RpcTxReq<Rpc::Network>>,
         block: Option<BlockId>,
-    ) -> Result<Vec<SimulatedBlock<RpcBlock<Rpc::Network>>>, BaseEthApiError> {
+    ) -> Result<Vec<BaseSimulatedBlock<RpcBlock<Rpc::Network>>>, BaseEthApiError> {
         self.simulate(payload, block, SimulateVersion::V2).await
     }
 
     /// Shared body of `eth_simulateV1` and `eth_simulateV2`, which differ only in how `version`
-    /// seeds each simulated block's env and resolves `BLOCKHASH` of simulated blocks.
+    /// seeds each simulated block's env and resolves `BLOCKHASH` of simulated blocks, and in the
+    /// `gasExtra` V2 finds for its calls (V1's are all `None`).
     async fn simulate(
         &self,
         payload: SimulatePayload<RpcTxReq<Rpc::Network>>,
         block: Option<BlockId>,
         version: SimulateVersion,
-    ) -> Result<Vec<SimulatedBlock<RpcBlock<Rpc::Network>>>, BaseEthApiError> {
+    ) -> Result<Vec<BaseSimulatedBlock<RpcBlock<Rpc::Network>>>, BaseEthApiError> {
         if payload.block_state_calls.len() > self.max_simulate_blocks() as usize {
             return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into());
         }
@@ -154,7 +159,7 @@ where
                 max_simulate_blocks,
             )?;
 
-            let mut blocks: Vec<SimulatedBlock<RpcBlock<Rpc::Network>>> =
+            let mut blocks: Vec<BaseSimulatedBlock<RpcBlock<Rpc::Network>>> =
                 Vec::with_capacity(block_state_calls.len());
 
             let call_gas_limit = this.call_gas_limit();
@@ -234,54 +239,52 @@ where
                     )
                 };
 
-                let (result, results) = if trace_transfers {
-                    // prepare inspector to capture transfer inside the evm so they are recorded
-                    // and included in logs
-                    let inspector = TransferInspector::new(false).with_logs(true);
-                    let evm =
-                        this.evm_config().evm_with_env_and_inspector(&mut db, evm_env, inspector);
-                    let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
+                let config = this.evm_config();
+                // Executes the block's calls on `evm`, whichever inspector it carries.
+                macro_rules! execute_block {
+                    ($evm:expr) => {{
+                        let mut builder = config.create_block_builder($evm, &parent, ctx);
 
-                    if let Some(ref state_overrides) = state_overrides {
-                        simulate::apply_precompile_overrides(
-                            state_overrides,
-                            builder.evm_mut().precompiles_mut(),
+                        if let Some(ref state_overrides) = state_overrides {
+                            simulate::apply_precompile_overrides(
+                                state_overrides,
+                                builder.evm_mut().precompiles_mut(),
+                            )
+                            .map_err(|e| BaseEthApiError::from_eth_err(EthApiError::other(e)))?;
+                        }
+
+                        simulate::execute_transactions(
+                            builder,
+                            &state_provider,
+                            calls,
+                            &mut remaining_call_gas_limit,
+                            chain_id,
+                            this.compute_state_root_for_eth_simulate(),
+                            this.converter(),
                         )
-                        .map_err(|e| BaseEthApiError::from_eth_err(EthApiError::other(e)))?;
+                        .map_err(map_err)?
+                    }};
+                }
+
+                // `traceTransfers` records transfers inside the EVM so they are included in logs.
+                // V2 finds each call's `gasleft()` bound (`GasLeftGuardInspector`); V1 runs
+                // uninspected unless it traces transfers.
+                let transfers = || TransferInspector::new(false).with_logs(true);
+                let bounds = GasLeftBounds::default();
+                let guard = || GasLeftGuardInspector::new(bounds.clone());
+                let (result, results) = match (trace_transfers, version) {
+                    (true, SimulateVersion::V1) => execute_block!(
+                        config.evm_with_env_and_inspector(&mut db, evm_env, transfers())
+                    ),
+                    (true, SimulateVersion::V2) => execute_block!(
+                        config.evm_with_env_and_inspector(&mut db, evm_env, (transfers(), guard()))
+                    ),
+                    (false, SimulateVersion::V1) => {
+                        execute_block!(config.evm_with_env(&mut db, evm_env))
                     }
-
-                    simulate::execute_transactions(
-                        builder,
-                        &state_provider,
-                        calls,
-                        &mut remaining_call_gas_limit,
-                        chain_id,
-                        this.compute_state_root_for_eth_simulate(),
-                        this.converter(),
-                    )
-                    .map_err(map_err)?
-                } else {
-                    let evm = this.evm_config().evm_with_env(&mut db, evm_env);
-                    let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
-
-                    if let Some(ref state_overrides) = state_overrides {
-                        simulate::apply_precompile_overrides(
-                            state_overrides,
-                            builder.evm_mut().precompiles_mut(),
-                        )
-                        .map_err(|e| BaseEthApiError::from_eth_err(EthApiError::other(e)))?;
+                    (false, SimulateVersion::V2) => {
+                        execute_block!(config.evm_with_env_and_inspector(&mut db, evm_env, guard()))
                     }
-
-                    simulate::execute_transactions(
-                        builder,
-                        &state_provider,
-                        calls,
-                        &mut remaining_call_gas_limit,
-                        chain_id,
-                        this.compute_state_root_for_eth_simulate(),
-                        this.converter(),
-                    )
-                    .map_err(map_err)?
                 };
 
                 let simulated_header = result.block.clone_sealed_header();
@@ -302,7 +305,10 @@ where
                     this.converter(),
                 )?;
 
-                blocks.push(block);
+                blocks.push(BaseSimulatedBlock {
+                    inner: block.inner,
+                    calls: bounds.attach(block.calls),
+                });
             }
 
             Ok(blocks)
