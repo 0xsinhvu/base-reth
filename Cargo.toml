@@ -1,5 +1,5 @@
 [workspace.package]
-version = "1.5.5"
+version = "1.5.6"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -351,6 +351,7 @@ reth-evm = { git = "https://github.com/base/reth", tag = "base-v2.5.2.11" }
 reth-rpc = { git = "https://github.com/base/reth", tag = "base-v2.5.2.11" }
 reth-revm = { git = "https://github.com/base/reth", tag = "base-v2.5.2.11" }
 reth-errors = { git = "https://github.com/base/reth", tag = "base-v2.5.2.11" }
+reth-config = { git = "https://github.com/base/reth", tag = "base-v2.5.2.11" }
 reth-trie = { git = "https://github.com/base/reth", tag = "base-v2.5.2.11" }
 reth-exex = { git = "https://github.com/base/reth", tag = "base-v2.5.2.11" }
 reth-tasks = { git = "https://github.com/base/reth", tag = "base-v2.5.2.11" }
